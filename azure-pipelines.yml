@@ -118,120 +118,75 @@ stages:
         inlineScript: |
           set -euo pipefail
           #!/bin/bash
+          set -euo pipefail
 
           SUB_ID=$(SUB_ID)
           MAIN_REGION=$(MAIN_REGION)
-          AVTD_REGIONS=[]
-          DSPM_REGIONS=[]
 
+          # Listas de regiones permitidas (como strings para comparaciones rápidas en Bash)
+          ALLOWED_AVTD_LIST="southafricanorth australiaeast australiasoutheast centralindia eastasia japaneast japanwest koreacentral southindia southeastasia westindia canadacentral canadaeast francecentral germanywestcentral northeurope norwayeast swedencentral switzerlandnorth uksouth ukwest westeurope uaenorth brazilsouth centralus eastus eastus2 northcentralus southcentralus westus westus2 westus3"
+          ALLOWED_DSPM_LIST="australiaeast centralindia japaneast southeastasia germanywestcentral uksouth uaenorth brazilsouth eastus"
+
+          # --- Funciones de Cuota ---
           get_y1_limit() {
-            local sub="$1" reg="$2"
-            local versions=("2024-11-01" "2018-02-01")
-            for v in "${versions[@]}"; do
+              local sub="$1" reg="$2"
               local out
-              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=$v" --query "value[?contains(name.value,'dynamic') && contains(name.value,'Linux')].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "")
-              [[ "$out" =~ ^[0-9]+$ ]] && { echo "$out"; return 0; }
-            done
-            echo "0"
+              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'dynamic') && contains(name.value,'Linux')].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "0")
+              [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
           }
 
           get_basv2_cores_limit() {
-            local sub="$1" reg="$2"
-            local api="2023-07-01"
-            local out
-            out=$(az rest --method get \
-              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=$api" \
-              --query "value[?name.value=='standardBSv2Family'].limit | [0]" \
-              -o tsv 2>/dev/null | tr -d '\r' || true)
-            [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
+              local sub="$1" reg="$2"
+              local out
+              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=2023-07-01" --query "value[?name.value=='standardBSv2Family'].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "0")
+              [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
           }
 
-          get_ep1_status() {
-            HAS_QUOTA=$(az rest --method get   --url "https://management.azure.com/subscriptions/$1/providers/Microsoft.Web/locations/$2/usages?api-version=2025-05-01" --query "value[?name.value=='EP1'] | [0] | currentValue < limit" -o tsv 2>/dev/null || echo "false")
-            echo "$HAS_QUOTA"
-          }
+          # 1. Chequeo de EP1 en Región Principal
+          EP1_AVAILABLE=$(az rest --method get --url "https://management.azure.com/subscriptions/$SUB_ID/providers/Microsoft.Web/locations/$MAIN_REGION/usages?api-version=2024-11-01" --query "value[?name.value=='EP1'] | [0] | currentValue < limit" -o tsv 2>/dev/null || echo "false")
+          #FS_ENABLE=$([ "$EP1_AVAILABLE" == "true" ] && echo "true" || echo "false")
+          FS_ENABLE="true"
 
-          echo "Checkin EP1 quota in Main Region for FileSecurity: $MAIN_REGION..."
-          EP1_AVAILABLE=$(get_ep1_status "$SUB_ID" "$MAIN_REGION")
-          if [ "$EP1_AVAILABLE" == "true" ]; then
-              echo "EP1 quota is available in the main region. Enabling File Security deployment."
-              FS_ENABLE=true
-          else
-              echo "EP1 quota is not available in the main region. Disabling File Security deployment."
-              FS_ENABLE=false
-          fi
-          echo "Searching regions with VM or ACR resources for subscription $SUB_ID..."
-          RESOURCE_REGIONS=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.containerregistry/registries') | project location | distinct location" --query "data[].location" -o tsv | tr -d '\r' | tr '[:upper:]' '[:lower:]')
-          echo "Regions with VM or ACR: $RESOURCE_REGIONS"
-          DEPLOYABLE_REGIONS=()
-          for REGION in $RESOURCE_REGIONS; do
-            echo "Checkin Y1 quota in region $REGION..."
-            LIMIT=$(get_y1_limit "$SUB_ID" "$REGION")
-            if [ "$LIMIT" -gt 0 ]; then
-              echo "The region $REGION has quota available."
-              DEPLOYABLE_REGIONS+=("$REGION")
-            else
-              echo "The region $REGION does not have quota available."
-            fi
+          # --- PROCESO AVTD ---
+          echo "Procesando regiones AVTD..."
+          RAW_AVTD=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.containerregistry/registries') | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
+
+          FINAL_AVTD_ARRAY=()
+          for REG in $RAW_AVTD; do
+              # Solo si la región está en la lista permitida
+              if [[ $ALLOWED_AVTD_LIST =~ (^|[[:space:]])$REG($|[[:space:]]) ]]; then
+                  if [ $(get_y1_limit "$SUB_ID" "$REG") -gt 0 ]; then
+                      FINAL_AVTD_ARRAY+=("$REG")
+                  fi
+              fi
           done
-          ALLOWED_AVTD='["southafricanorth","australiaeast","australiasoutheast","centralindia","eastasia","japaneast","japanwest","koreacentral","southindia","southeastasia","westindia","canadacentral","canadaeast","francecentral","germanywestcentral","northeurope","norwayeast","swedencentral","switzerlandnorth","uksouth","ukwest","westeurope","uaenorth","brazilsouth","centralus","eastus","eastus2","northcentralus","southcentralus","westus","westus2","westus3"]'
-          if [ ${#DEPLOYABLE_REGIONS[@]} -eq 0 ]; then
-              FINAL_REGIONS_AVTD="[]"
-          else
-              FINAL_REGIONS_AVTD=$(printf '%s\n' "${DEPLOYABLE_REGIONS[@]}" | jq -R . | jq -s -c \
-                  --argjson allowed "$ALLOWED_AVTD" \
-                  '[.[] | select(. as $curr | $allowed | index($curr))]')
-          fi
-          echo "Searching regions with VM or StorageAccount resources for subscription $SUB_ID..."
-          REGIONS_DSPM=$(az graph query -q "
-            resources
-            | where subscriptionId == '$SUB_ID'
-            | where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.storage/storageaccounts'
-            | summarize 
-                hasVM = countif(type =~ 'microsoft.compute/virtualmachines'), 
-                hasStorage = countif(type =~ 'microsoft.storage/storageaccounts') 
-              by location
-            | where hasVM > 0 or hasStorage > 0
-            | project location
-          " --query "data[].location" -o tsv 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]' | sort -u)
-          DEPLOYABLE_REGIONS_DSPM=()
-          echo "Regions with VM or StorageAccount: $REGIONS_DSPM"
-          for REGION in $REGIONS_DSPM; do
-            echo "Checkin Y1 quota in region $REGION..."
-            LIMIT=$(get_basv2_cores_limit "$SUB_ID" "$REGION")
-            if [ "$LIMIT" -gt 0 ]; then
-              echo "The region $REGION has quota available."
-              DEPLOYABLE_REGIONS_DSPM+=("$REGION")
-            else
-              echo "The region $REGION does not have quota available."
-            fi
+
+          # --- PROCESO DSPM ---
+          echo "Procesando regiones DSPM..."
+          RAW_DSPM=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.storage/storageaccounts' | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
+
+          FINAL_DSPM_ARRAY=()
+          for REG in $RAW_DSPM; do
+              # Solo si la región está en la lista permitida
+              if [[ $ALLOWED_DSPM_LIST =~ (^|[[:space:]])$REG($|[[:space:]]) ]]; then
+                  if [ $(get_basv2_cores_limit "$SUB_ID" "$REG") -gt 0 ]; then
+                      FINAL_DSPM_ARRAY+=("$REG")
+                  fi
+              fi
           done
-          ALLOWED_REGIONS_DSPM='["australiaeast","centralindia","japaneast","southeastasia","germanywestcentral","uksouth","uaenorth","brazilsouth","eastus"]'
-          if [ ${#DEPLOYABLE_REGIONS_DSPM[@]} -eq 0 ]; then
-              FINAL_REGIONS_DSPM="[]"
-          else
-              FINAL_REGIONS_DSPM=$(printf '%s\n' "${DEPLOYABLE_REGIONS_DSPM[@]}" | jq -R . | jq -s -c \
-                  --argjson allowed "$ALLOWED_REGIONS_DSPM" \
-                  '[.[] | select(. as $curr | $allowed | index($curr))]')
-          fi
 
-          to_json_array() {
-            if [ "$#" -eq 0 ]; then
-              echo "[]"
-            else
-              printf '%s\n' "$@" | jq -R . | jq -s -c .
-            fi
-          }
+          # Convertir a formato JSON para las variables de salida
+          AVTD_JSON=$(printf '%s\n' "${FINAL_AVTD_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
+          DSPM_JSON=$(printf '%s\n' "${FINAL_DSPM_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
 
-          AVTD_REGIONS="$FINAL_REGIONS_AVTD"
-          DSPM_REGIONS="$FINAL_REGIONS_DSPM"
+          echo "Resultados finales:"
+          echo "AVTD: $AVTD_JSON"
+          echo "DSPM: $DSPM_JSON"
 
-          echo "Final AVTD deployable regions: $AVTD_REGIONS"
-          echo "Final DSPM deployable regions: $DSPM_REGIONS"
-
+          # Variables de salida para Azure DevOps
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
-          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_REGIONS"
-          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_REGIONS"
+          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_JSON"
+          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_JSON"
       env:
         SUB_ID: $(SUB_ID)
         REGION: $(MAIN_REGION)
@@ -285,9 +240,7 @@ stages:
           echo "== Setting custom configuration for Data Security Posture Management =="
           REGIONS_COUNT_DSPM=$(echo "$DSPM_REGIONS" | jq 'length')
           if [[ $REGIONS_COUNT_DSPM -eq 0 ]]; then
-            sed -i '/module "data-security-posture-management" {/,/^[[:space:]]*module "/{
-            /^[[:space:]]*module "/! s/^/#/
-            }' "$PKG_DIR/main.tf"
+            sed -i '/module "data-security-posture-management" {/,/^[[:space:]]*}/ s/^/#/' "$PKG_DIR/main.tf"
             
             DSPM_VAL=$(echo "[]")
             NEW_ARRAY='"data-security-posture-management": [],'
