@@ -6,7 +6,7 @@ variables:
   SELF_HOSTED_POOL_NAME: 'NAME_OF_YOUR_SELF_HOSTED_POOL' # Optional
   MAX_PARALLEL: 3
   TF_VERSION: '1.14.1'
-  MAIN_REGION: 'eastus'
+  #MAIN_REGION: 'eastus'
 
 stages:
 - stage: deploy
@@ -40,7 +40,8 @@ stages:
               "SUB_NAME": s["name"],
               "SUB_ID": s["id"],
               "BACKEND_URL": s["backend_url"],
-              "STORAGE_ACCOUNT": s["storage_account"]
+              "STORAGE_ACCOUNT": s["storage_account"],
+              "MAIN_REGION": s["main_region"]
           }
         print("##vso[task.setvariable variable=MATRIX;isOutput=true]" + json.dumps(matrix))
         PY
@@ -265,12 +266,13 @@ stages:
           
           unzip -o "$PKG_ZIP" -d "$PKG_DIR"
 
-          cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications
+          #cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications
 
           echo "== Override Configuration according environment characteristics =="
           find "$PKG_DIR" -maxdepth 2 -type f -name "*.sh" -print
           chmod +x "$PKG_DIR"/*.sh || true
           chmod +x "$PKG_DIR"/cam/*.sh 2>/dev/null || true
+          sed -i "s/export CAM_DEPLOYED_REGION=\".*\"/export CAM_DEPLOYED_REGION=\"${MAIN_REGION}\"/" "$PKG_DIR/deploy.sh" || true
           sed -i "s|^export SUBSCRIPTION_ID=.*|export SUBSCRIPTION_ID=\"${SUB_ID}\"|g" "$PKG_DIR/deploy.sh" || true
           sed -i "s|^export CLOUD_ACCOUNT_NAME=.*|export CLOUD_ACCOUNT_NAME=\"${CLOUD_ACCOUNT_NAME}\"|g" "$PKG_DIR/deploy.sh" || true
           sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
@@ -278,7 +280,7 @@ stages:
           #sed -i 's/version *= *"=4.3.0"/version = "3.116.0"/g' "$PKG_DIR/main.tf"
           #sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${STORAGE_ACCOUNT}\"|g" "$PKG_DIR/main.tf" || true
 
-          cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 2
+          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content before modifications
 
           echo "== Setting custom configuration for Data Security Posture Management =="
           REGIONS_COUNT_DSPM=$(echo "$DSPM_REGIONS" | jq 'length')
@@ -315,7 +317,7 @@ stages:
               sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${STORAGE_ACCOUNT}\"|g" "$PKG_DIR/main.tf" || true
             fi
 
-            cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 3
+            #cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 3
           fi
 
           cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 4 
@@ -336,13 +338,13 @@ stages:
               sed -i '/"cloud-sentry": \[/,/\],/c\'"$NEW_ARRAY" "$PKG_DIR/deploy.sh"
           fi
 
-          cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 5
+          #cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 5
           echo "== Setting the subscription context =="
           az account set --subscription "$SUB_ID"
 
           #Only for debug, to check the generated configuration files before deployment. Can be removed later.
-          cat "$PKG_DIR/deploy.sh"
-          cat "$PKG_DIR/main.tf"
+          #cat "$PKG_DIR/deploy.sh"
+          #cat "$PKG_DIR/main.tf"
 
           echo "== Setting authentication parameters =="
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
@@ -371,3 +373,4 @@ stages:
         BACKEND_URL: $(BACKEND_URL)
         STORAGE_ACCOUNT: $(STORAGE_ACCOUNT)
         CLOUD_ACCOUNT_NAME: "$(SUB_NAME)"
+        MAIN_REGION: $(MAIN_REGION)
