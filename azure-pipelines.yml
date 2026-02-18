@@ -269,8 +269,6 @@ stages:
               echo "Setting quarantine storage account to ${STORAGE_ACCOUNT}"
               sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${STORAGE_ACCOUNT}\"|g" "$PKG_DIR/main.tf" || true
             fi
-
-            #cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 3
           fi
 
           cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 4 
