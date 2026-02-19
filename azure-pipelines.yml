@@ -240,21 +240,25 @@ stages:
           if [[ -z "$DSPM_REGIONS" || "$DSPM_REGIONS" == "[]" ]]; then
               REGIONS_COUNT_DSPM=0
               sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
-          else
-              REGIONS_COUNT_DSPM=$(echo "$DSPM_REGIONS" | jq '. | length' 2>/dev/null || echo 0)
-              NEW_ARRAY="\"data-security-posture-management\": $DSPM_REGIONS,"
-              sed -i "s|\"data-security-posture-management\": .*|$NEW_ARRAY|" "$PKG_DIR/deploy.sh"
           fi
 
           echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
           if [[ -z "$AVTD_REGIONS" || "$AVTD_REGIONS" == "[]" ]]; then
               REGIONS_COUNT_AVTD=0
               sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
-          else
-              REGIONS_COUNT_AVTD=$(echo "$AVTD_REGIONS" | jq '. | length' 2>/dev/null || echo 0)
-              NEW_ARRAY="\"cloud-sentry\": $AVTD_REGIONS,"
-              sed -i "s|\"cloud-sentry\": .*|$NEW_ARRAY|" "$PKG_DIR/deploy.sh"
           fi
+          AVTD_JSON=$(echo "$AVTD_REGIONS" | jq -c .)
+          DSPM_JSON=$(echo "$DSPM_REGIONS" | jq -c .)
+          NEW_JSON_VALUE=$(jq -n -c \
+            --argjson cs "$AVTD_JSON" \
+            --argjson dspm "$DSPM_JSON" \
+            '{
+              "cloud-sentry": $cs,
+              "data-security-posture-management": $dspm,
+              "file-storage-security": null,
+              "real-time-posture-monitoring": null
+            }')
+          perl -i -0777 -pe "s/export FEATURES_DEPLOYED_REGIONS='\{.*?\}'/export FEATURES_DEPLOYED_REGIONS='$NEW_JSON_VALUE'/s" "$PKG_DIR/deploy.sh"
 
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
@@ -269,6 +273,7 @@ stages:
             fi
           fi
 
+          echo "== DEBUG DEPLOY.SH =="
           cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content after modifications
 
           echo "== Setting the subscription context =="
