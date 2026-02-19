@@ -246,6 +246,16 @@ stages:
               sed -i "s|\"data-security-posture-management\": .*|$NEW_ARRAY|" "$PKG_DIR/deploy.sh"
           fi
 
+          echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
+          if [[ -z "$AVTD_REGIONS" || "$AVTD_REGIONS" == "[]" ]]; then
+              REGIONS_COUNT_AVTD=0
+              sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
+          else
+              REGIONS_COUNT_AVTD=$(echo "$AVTD_REGIONS" | jq '. | length' 2>/dev/null || echo 0)
+              NEW_ARRAY="\"cloud-sentry\": $AVTD_REGIONS,"
+              sed -i "s|\"cloud-sentry\": .*|$NEW_ARRAY|" "$PKG_DIR/deploy.sh"
+          fi
+
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
             echo "== File Storage Security will be disabled due to lack of EP1 quota in the main region =="
@@ -259,15 +269,10 @@ stages:
             fi
           fi
 
-          cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 4 
-          echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
-          REGIONS_COUNT_AVTD=$(echo "$AVTD_REGIONS" | jq 'length')
-          NEW_ARRAY='"cloud-sentry": '"$AVTD_REGIONS",'
-          sed -i '/"cloud-sentry": \[/,/\],/c\'"$NEW_ARRAY" "$PKG_DIR/deploy.sh"
+          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content after modifications
+
           echo "== Setting the subscription context =="
           az account set --subscription "$SUB_ID"
-
-          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content after modifications
 
           echo "== Setting authentication parameters =="
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
