@@ -148,7 +148,7 @@ stages:
           FS_ENABLE="true"
 
           RAW_AVTD=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.containerregistry/registries') | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
-
+          echo "Regins with AVTD-related resources: $RAW_AVTD"
           FINAL_AVTD_ARRAY=()
           for REG in $RAW_AVTD; do
               # Solo si la región está en la lista permitida
@@ -157,18 +157,20 @@ stages:
               fi
           done
 
-          echo "Procesando regiones DSPM..."
           RAW_DSPM=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.storage/storageaccounts' | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
-
+          echo "Regins with DSPM-related resources: $RAW_DSPM"
           FINAL_DSPM_ARRAY=()
           for REG in $RAW_DSPM; do
-              # Solo si la región está en la lista permitida
               if [[ $ALLOWED_DSPM_LIST =~ (^|[[:space:]])$REG($|[[:space:]]) ]]; then
                 FINAL_DSPM_ARRAY+=("$REG")
               fi
           done
+
           AVTD_JSON=$(printf '%s\n' "${FINAL_AVTD_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
           DSPM_JSON=$(printf '%s\n' "${FINAL_DSPM_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
+
+          echo "Allowed AVTD regions: $ALLOWED_AVTD_LIST"
+          echo "Allowed DSPM regions: $ALLOWED_DSPM_LIST"
 
           echo "AVTD: $AVTD_JSON"
           echo "DSPM: $DSPM_JSON"
