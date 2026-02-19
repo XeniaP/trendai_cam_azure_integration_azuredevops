@@ -1,8 +1,32 @@
 [
   {
-    "id": "",
+    "id": "d2b29eee-1575-4fb2-b986-b9f15e006251",
+    "name": "V1_Demo_Apps",
+    "backend_url": "https://vision-one-cloud-accounts-us-east-1.s3.us-east-1.amazonaws.com/templates/azure/cloud-account-management-terraform-package-1771516344807111332.zip",
+    "storage_account": ""
+  },
+  {
+    "id": "2bd04cab-cd9a-4b2f-85f3-72e417e80155",
     "name": "Project1",
-    "backend_url": "",
+    "backend_url": "https://vision-one-cloud-accounts-us-east-1.s3.us-east-1.amazonaws.com/templates/azure/cloud-account-management-terraform-package-1771516348424296640.zip",
+    "storage_account": ""
+  },
+  {
+    "id": "1a1b2e67-4753-49dd-9223-d44949e6e41c",
+    "name": "Test2",
+    "backend_url": "https://vision-one-cloud-accounts-us-east-1.s3.us-east-1.amazonaws.com/templates/azure/cloud-account-management-terraform-package-1771516351317052591.zip",
+    "storage_account": ""
+  },
+  {
+    "id": "0ecaadf6-b648-4e75-b518-4a5f5677bd4a",
+    "name": "LabXenia",
+    "backend_url": "https://vision-one-cloud-accounts-us-east-1.s3.us-east-1.amazonaws.com/templates/azure/cloud-account-management-terraform-package-1771516354243999368.zip",
+    "storage_account": ""
+  },
+  {
+    "id": "08140525-b176-468a-ad06-7ae2fb8d3eb9",
+    "name": "Delegate",
+    "backend_url": "https://vision-one-cloud-accounts-us-east-1.s3.us-east-1.amazonaws.com/templates/azure/cloud-account-management-terraform-package-1771516357700155285.zip",
     "storage_account": ""
   }
 ]
