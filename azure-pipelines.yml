@@ -197,7 +197,6 @@ stages:
           # FUNCIÓN MÁGICA: Convierte el texto [a,b] en JSON real ["a","b"]
           to_clean_json() {
             local input="$1"
-            # Eliminamos corchetes, dividimos por comas, limpiamos espacios y re-armamos con jq
             echo "$input" | tr -d '[]' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .
           }
 
@@ -264,6 +263,7 @@ stages:
               sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
               AVTD_JSON="[]"
           else
+              echo "AVTD will be deployed in the following regions: $AVTD_REGIONS"
               AVTD_JSON=$(echo "$AVTD_REGIONS" | jq -c .)
           fi
           NEW_JSON_VALUE=$(jq -n -c \
