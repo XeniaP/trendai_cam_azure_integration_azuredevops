@@ -190,12 +190,24 @@ stages:
         inlineScript: |
           set -euo pipefail
           
-          echo "== Setting Features Environment =="
+          # Capturamos los valores (que vienen como [reg1,reg2])
+          RAW_AVTD=$(CheckQuota.DEPLOY_AVTD_REGIONS)
+          RAW_DSPM=$(CheckQuota.DEPLOY_DSPM_REGIONS)
+
+          # FUNCIÓN MÁGICA: Convierte el texto [a,b] en JSON real ["a","b"]
+          to_clean_json() {
+            local input="$1"
+            # Eliminamos corchetes, dividimos por comas, limpiamos espacios y re-armamos con jq
+            echo "$input" | tr -d '[]' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .
+          }
+
+          # Re-procesamos para asegurar que tengan comillas
+          export AVTD_REGIONS=$(to_clean_json "$RAW_AVTD")
+          export DSPM_REGIONS=$(to_clean_json "$RAW_DSPM")
           export FS_STATUS=$(CheckQuota.FS_ENABLE)
-          export AVTD_REGIONS=$(CheckQuota.DEPLOY_AVTD_REGIONS)
-          export DSPM_REGIONS=$(CheckQuota.DEPLOY_DSPM_REGIONS)
+
           echo "FS_STATUS: $FS_STATUS"
-          echo "AVTD_REGIONS: $AVTD_REGIONS"
+          echo "AVTD_REGIONS: $AVTD_REGIONS" # Ahora saldrá con ["..."]
           echo "DSPM_REGIONS: $DSPM_REGIONS"
 
           echo "== Setting TrendAI Environment =="
