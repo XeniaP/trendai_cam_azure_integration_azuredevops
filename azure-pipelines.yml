@@ -238,17 +238,21 @@ stages:
 
           echo "== Setting custom configuration for Data Security Posture Management =="
           if [[ -z "$DSPM_REGIONS" || "$DSPM_REGIONS" == "[]" ]]; then
-              REGIONS_COUNT_DSPM=0
-              sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
+            REGIONS_COUNT_DSPM=0
+            sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
+            DSPM_JSON="[]"
+          else
+            DSPM_JSON=$(echo "$DSPM_REGIONS" | jq -c .)
           fi
 
           echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
           if [[ -z "$AVTD_REGIONS" || "$AVTD_REGIONS" == "[]" ]]; then
               REGIONS_COUNT_AVTD=0
               sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
+              AVTD_JSON="[]"
+          else
+              AVTD_JSON=$(echo "$AVTD_REGIONS" | jq -c .)
           fi
-          AVTD_JSON=$(echo "$AVTD_REGIONS" | jq -c .)
-          DSPM_JSON=$(echo "$DSPM_REGIONS" | jq -c .)
           NEW_JSON_VALUE=$(jq -n -c \
             --argjson cs "$AVTD_JSON" \
             --argjson dspm "$DSPM_JSON" \
@@ -258,6 +262,7 @@ stages:
               "file-storage-security": null,
               "real-time-posture-monitoring": null
             }')
+          echo "New FEATURES_DEPLOYED_REGIONS value: $NEW_JSON_VALUE"
           perl -i -0777 -pe "s/export FEATURES_DEPLOYED_REGIONS='\{.*?\}'/export FEATURES_DEPLOYED_REGIONS='$NEW_JSON_VALUE'/s" "$PKG_DIR/deploy.sh"
 
           echo "== Setting custom configuration for File Storage Security =="
