@@ -242,6 +242,7 @@ stages:
             sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
             DSPM_JSON="[]"
           else
+            echo "DSPM will be deployed in the following regions: $DSPM_REGIONS"
             DSPM_JSON=$(echo "$DSPM_REGIONS" | jq -c .)
           fi
 
