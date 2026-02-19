@@ -248,7 +248,8 @@ stages:
           sed -i 's/default *= *true/default = false/g' "$PKG_DIR/cam/variables.tf"
 
           echo "== Setting custom configuration for Data Security Posture Management =="
-          if [[ -z "$DSPM_REGIONS" || "$DSPM_REGIONS" == "[]" ]]; then
+          VALID_DSPM_COUNT=$(echo "$DSPM_REGIONS" | jq '[.[] | select(. != "")] | length' 2>/dev/null || echo 0)
+          if [[ -z "$DSPM_REGIONS" || "$VALID_DSPM_COUNT" -eq 0 ]]; then
             REGIONS_COUNT_DSPM=0
             sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
             DSPM_JSON="[]"
@@ -258,7 +259,8 @@ stages:
           fi
 
           echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
-          if [[ -z "$AVTD_REGIONS" || "$AVTD_REGIONS" == "[]" ]]; then
+          VALID_AVTD_COUNT=$(echo "$AVTD_REGIONS" | jq '[.[] | select(. != "")] | length' 2>/dev/null || echo 0)
+          if [[ -z "$AVTD_REGIONS" || "$VALID_AVTD_COUNT" -eq 0 ]]; then
               REGIONS_COUNT_AVTD=0
               sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
               AVTD_JSON="[]"
