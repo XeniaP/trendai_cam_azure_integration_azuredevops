@@ -344,6 +344,7 @@ stages:
           echo "== Identificando Features Activas en deploy.sh =="
           ACTIVE_FEATURES_JSON=$(grep "export FEATURES=" "$DEPLOY_SH" | cut -d"'" -f2)
           echo "Features activas detectadas: $ACTIVE_FEATURES_JSON"
+          echo "All Features: ${ALL_FEATURES[*]}"
           STORAGE_ACCOUNT=$(az storage account list --query "[?starts_with(name, '$SA_PREFIX')].name | [0]" -o tsv | tr -d '\r')
           CONTAINER_NAME=$(az storage container list --account-name "$STORAGE_ACCOUNT" --query "[?starts_with(name, '$CONTAINER_PREFIX')].name | [0]" -o tsv | tr -d '\r')
 
@@ -359,6 +360,9 @@ stages:
           echo "== Sincronizando Estado con Features =="
           terraform init -backend=false
 
+          echo "== Estado sincronizado con las features activas =="
+          terraform state list
+
           for FEATURE in "${ALL_FEATURES[@]}"; do
               # Verificamos si la feature NO está en el JSON de activas
               IS_ACTIVE=$(echo "$ACTIVE_FEATURES_JSON" | jq -r ". | contains([\"$FEATURE\"])")
@@ -371,6 +375,9 @@ stages:
                   echo "[ACTIVA] Manteniendo 'module.$FEATURE'."
               fi
           done
+          terraform init -backend=false
+          echo "== Estado sincronizado con las features activas =="
+          terraform state list
 
           # 7. Subir el Estado Limpio
           echo "== Actualizando Estado en Azure =="
