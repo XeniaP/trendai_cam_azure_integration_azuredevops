@@ -157,8 +157,8 @@ stages:
           # 1. Chequeo de EP1 en Región Principal
           EP1_AVAILABLE=$(az rest --method get --url "https://management.azure.com/subscriptions/$SUB_ID/providers/Microsoft.Web/locations/$MAIN_REGION/usages?api-version=2024-11-01" --query "value[?name.value=='EP1'] | [0] | currentValue < limit" -o tsv 2>/dev/null || echo "false")
           echo "EP1 availability in main region ($MAIN_REGION): $EP1_AVAILABLE"
-          #FS_ENABLE=$([ "$EP1_AVAILABLE" == "true" ] && echo "true" || echo "false")
-          FS_ENABLE="true"
+          FS_ENABLE=$([ "$EP1_AVAILABLE" == "true" ] && echo "true" || echo "false")
+          #FS_ENABLE="true"
 
           RAW_AVTD=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.containerregistry/registries') | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
           echo "Regins with AVTD-related resources: $RAW_AVTD"
