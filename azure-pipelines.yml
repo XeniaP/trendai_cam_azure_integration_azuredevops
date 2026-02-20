@@ -131,15 +131,27 @@ stages:
           get_y1_limit() {
               local sub="$1" reg="$2"
               local out
-              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'dynamic') && contains(name.value,'Linux')].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "0")
-              [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
+              LIMIT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'Y1')].limit | [0]" -o tsv | tr -d '\r')
+              CURRENT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'Y1')].currentValue | [0]" -o tsv | tr -d '\r')
+              echo "=> $sub: The quota limit for Y1 in region $reg is: $LIMIT (current: $CURRENT)"
+              [[ "$LIMIT" =~ ^[0-9]+$ ]] && echo "$LIMIT" || echo "0"
           }
 
           get_basv2_cores_limit() {
               local sub="$1" reg="$2"
               local out
-              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=2023-07-01" --query "value[?name.value=='standardBSv2Family'].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "0")
-              [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
+              LIMIT=$(az quota quota --resource-name "standardBasv2Family" --scope "/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg" --query "properties.limit.value" -o tsv | tr -d '\r')
+              CURRENT=$(az quota quota --resource-name "standardBasv2Family" --scope "/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg" --query "properties.currentValue.value" -o tsv | tr -d '\r')
+              echo "=> $sub: The quota limit for standardBasv2Family cores in region $reg is: $LIMIT (current: $CURRENT)"
+              [[ "$LIMIT" =~ ^[0-9]+$ ]] && echo "$LIMIT" || echo "0"
+          }
+
+          get_ep1_available() {
+              local sub="$1" reg="$2"
+              local out
+              EP1_LIMIT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'EP1')].limit | [0]" -o tsv | tr -d '\r')
+              EP1_CURRENT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'EP1')].currentValue | [0]" -o tsv | tr -d '\r')
+              echo "=> $sub: The quota for EP1 in region $reg is: $EP1_CURRENT / $EP1_LIMIT"
           }
 
           # 1. Chequeo de EP1 en Región Principal
