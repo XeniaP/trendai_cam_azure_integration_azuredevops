@@ -187,6 +187,9 @@ stages:
           echo "AVTD: $AVTD_JSON"
           echo "DSPM: $DSPM_JSON"
 
+          echo " AVTD Sizing length: $(echo "$AVTD_JSON" | jq length)"
+          echo " DSPM Sizing length: $(echo "$DSPM_JSON" | jq length)"
+
           curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
@@ -255,6 +258,8 @@ stages:
           sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
           sed -i 's/default *= *true/default = false/g' "$PKG_DIR/cam/variables.tf"
           remove_feature_module_block "azure-activity-log"
+
+
           
           python3 -c "
           import os, json, re
