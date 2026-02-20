@@ -163,7 +163,6 @@ stages:
           echo "Regins with AVTD-related resources: $RAW_AVTD"
           FINAL_AVTD_ARRAY=()
           for REG in $RAW_AVTD; do
-              # Solo si la región está en la lista permitida
               if [[ $ALLOWED_AVTD_LIST =~ (^|[[:space:]])$REG($|[[:space:]]) ]]; then
                 FINAL_AVTD_ARRAY+=("$REG")
               fi
@@ -329,7 +328,21 @@ stages:
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
           export TF_LOG=ERROR
-          ./deploy.sh
+          #./deploy.sh
+
+          bash deploy.sh 2>&1 | tee pipeline.log
+          if grep -q "Error: Provider configuration not present" pipeline.log; then
+              echo "== Orphan Resource =="
+              ORPHAN=$(grep -A 1 "To work with" pipeline.log | tail -n 1 | awk '{print $1}')
+              
+              if [ -n "$ORPHAN" ]; then
+                  echo "Removing orphan resource: $ORPHAN"
+                  terraform state rm "$ORPHAN"
+                  
+                  echo "Retrying deployment after removing orphan resource..."
+                  bash deploy.sh
+              fi
+          fi
       env:
         SUB_ID: $(SUB_ID)
         BACKEND_URL: $(BACKEND_URL)
