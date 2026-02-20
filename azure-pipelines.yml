@@ -225,18 +225,10 @@ stages:
 
           function remove_feature_module_block() {
               local feature=$1
-              if [ -z "$feature" ]; then
-                  echo "[ERROR] Feature name is required"
-                  return 1
-              fi
-
-              awk -v feature="$feature" '
-                  BEGIN { found=0; depth=0 }
-                  /module[[:space:]]*"'"$feature"'"[[:space:]]*{/ { found=1; depth=1; next }
-                  found && /{/ { depth++ }
-                  found && /}/ { depth--; if (depth == 0) { found=0; next } }
-                  !found { print }
-                  ' main.tf > main.tf.tmp && mv main.tf.tmp main.tf
+              echo "== Optimizing FEATURES list =="
+              CURRENT_FEATURES=$(grep "export FEATURES=" "$PKG_DIR/deploy.sh" | cut -d"'" -f2)
+              UPDATED_FEATURES=$(echo "$CURRENT_FEATURES" | jq -c 'map(select(. != "'"$feature"'"))')
+              sed -i "s|export FEATURES=.*|export FEATURES='$UPDATED_FEATURES'|" "$PKG_DIR/deploy.sh"
           }
 
           echo "== Override Configuration according environment characteristics =="
@@ -248,12 +240,14 @@ stages:
           sed -i "s|^export CLOUD_ACCOUNT_NAME=.*|export CLOUD_ACCOUNT_NAME=\"${CLOUD_ACCOUNT_NAME}\"|g" "$PKG_DIR/deploy.sh" || true
           sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
           sed -i 's/default *= *true/default = false/g' "$PKG_DIR/cam/variables.tf"
+          remove_feature_module_block "azure-activity-log"
 
           echo "== Setting custom configuration for Data Security Posture Management =="
           VALID_DSPM_COUNT=$(echo "$DSPM_REGIONS" | jq '[.[] | select(. != "")] | length' 2>/dev/null || echo 0)
           if [[ -z "$DSPM_REGIONS" || "$VALID_DSPM_COUNT" -eq 0 ]]; then
             REGIONS_COUNT_DSPM=0
             sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
+            remove_feature_module_block "data-security-posture-management"
             DSPM_JSON="[]"
           else
             echo "DSPM will be deployed in the following regions: $DSPM_REGIONS"
@@ -265,6 +259,7 @@ stages:
           if [[ -z "$AVTD_REGIONS" || "$VALID_AVTD_COUNT" -eq 0 ]]; then
               REGIONS_COUNT_AVTD=0
               sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
+              remove_feature_module_block "cloud-sentry"
               AVTD_JSON="[]"
           else
               echo "AVTD will be deployed in the following regions: $AVTD_REGIONS"
