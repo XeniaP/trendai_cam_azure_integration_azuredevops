@@ -201,6 +201,9 @@ stages:
             DSPM_ENABLED="true"
           fi
 
+          echo "AVTD_ENABLED: $AVTD_ENABLED"
+          echo "DSPM_ENABLED: $DSPM_ENABLED"
+
           curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
@@ -232,7 +235,6 @@ stages:
             echo "$input" | tr -d '[]' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .
           }
 
-          # Re-procesamos para asegurar que tengan comillas
           export AVTD_REGIONS=$(to_clean_json "$RAW_AVTD")
           export DSPM_REGIONS=$(to_clean_json "$RAW_DSPM")
           export FS_STATUS=$(CheckQuota.FS_ENABLE)
@@ -240,7 +242,9 @@ stages:
           export DSPM_ENABLED=$(CheckQuota.DSPM_ENABLED)
 
           echo "FS_STATUS: $FS_STATUS"
-          echo "AVTD_REGIONS: $AVTD_REGIONS" # Ahora saldrá con ["..."]
+          echo "AVTD_ENABLED: $AVTD_ENABLED"
+          echo "DSPM_ENABLED: $DSPM_ENABLED"
+          echo "AVTD_REGIONS: $AVTD_REGIONS"
           echo "DSPM_REGIONS: $DSPM_REGIONS"
 
           echo "== Setting TrendAI Environment =="
@@ -257,7 +261,7 @@ stages:
 
           function remove_feature_module_block() {
               local feature=$1
-              echo "== Optimizing FEATURES list =="
+              echo "== Optimizing FEATURES list removing $feature =="
               CURRENT_FEATURES=$(grep "export FEATURES=" "$PKG_DIR/deploy.sh" | cut -d"'" -f2)
               UPDATED_FEATURES=$(echo "$CURRENT_FEATURES" | jq -c 'map(select(. != "'"$feature"'"))')
               sed -i "s|export FEATURES=.*|export FEATURES='$UPDATED_FEATURES'|" "$PKG_DIR/deploy.sh"
