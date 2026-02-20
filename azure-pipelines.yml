@@ -279,17 +279,41 @@ stages:
               echo "AVTD will be deployed in the following regions: $AVTD_REGIONS"
               AVTD_JSON=$(echo "$AVTD_REGIONS" | jq -c .)
           fi
-          NEW_JSON_VALUE=$(jq -n -c \
-            --argjson cs "$AVTD_JSON" \
-            --argjson dspm "$DSPM_JSON" \
-            '{
-              "cloud-sentry": $cs,
-              "data-security-posture-management": $dspm,
-              "file-storage-security": null,
-              "real-time-posture-monitoring": null
-            }')
-          ESCAPED_JSON=$(echo "$NEW_JSON_VALUE" | sed 's/[&/\]/\\&/g')
-          sed -i ":a;N;\$!ba;s|export FEATURES_DEPLOYED_REGIONS='.*'|export FEATURES_DEPLOYED_REGIONS='$ESCAPED_JSON'|g" "$PKG_DIR/deploy.sh"
+          
+          python3 -c "
+          import os, json, re
+          pkg_dir = os.environ.get('PKG_DIR', '.')
+          file_path = os.path.join(pkg_dir, 'deploy.sh')
+
+          try:
+              avtd = json.loads(os.environ.get('AVTD_REGIONS', '[]'))
+              dspm = json.loads(os.environ.get('DSPM_REGIONS', '[]'))
+              
+              features_data = {
+                  'cloud-sentry': avtd,
+                  'data-security-posture-management': dspm,
+                  'file-storage-security': None,
+                  'real-time-posture-monitoring': None
+              }
+              json_str = json.dumps(features_data)
+              new_export_line = f\"export FEATURES_DEPLOYED_REGIONS='{json_str}'\"
+              if os.path.exists(file_path):
+                  with open(file_path, 'r') as f:
+                      content = f.read()
+                  pattern = r\"export FEATURES_DEPLOYED_REGIONS='.*?'\"
+                  if re.search(pattern, content, flags=re.DOTALL):
+                      updated_content = re.sub(pattern, new_export_line, content, flags=re.DOTALL)
+                      with open(file_path, 'w') as f:
+                          f.write(updated_content)
+                      print(f'[SUCCESS] Archivo {file_path} actualizado.')
+                  else:
+                      print('[ERROR] No se encontró la variable FEATURES_DEPLOYED_REGIONS.')
+              else:
+                  print(f'[ERROR] No existe el archivo: {file_path}')
+
+          except Exception as e:
+              print(f'[CRITICAL ERROR] {e}')
+          "
 
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
