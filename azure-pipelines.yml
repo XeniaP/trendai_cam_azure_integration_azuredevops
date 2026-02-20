@@ -289,7 +289,7 @@ stages:
               "real-time-posture-monitoring": null
             }')
           ESCAPED_JSON=$(echo "$NEW_JSON_VALUE" | sed 's/[&/\]/\\&/g')
-          sed -i "s|export FEATURES_DEPLOYED_REGIONS=.*|export FEATURES_DEPLOYED_REGIONS='$ESCAPED_JSON'|g" "$PKG_DIR/deploy.sh"
+          sed -i ":a;N;\$!ba;s|export FEATURES_DEPLOYED_REGIONS='.*'|export FEATURES_DEPLOYED_REGIONS='$ESCAPED_JSON'|g" "$PKG_DIR/deploy.sh"
 
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
