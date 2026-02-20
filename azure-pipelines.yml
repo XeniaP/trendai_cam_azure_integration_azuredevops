@@ -123,8 +123,6 @@ stages:
           SUB_ID=$(SUB_ID)
           MAIN_REGION=$(MAIN_REGION)
           FS_ENABLE="true"
-          AVTD_ENABLED="false"
-          DSPM_ENABLED="false"
 
           # Listas de regiones permitidas (como strings para comparaciones rápidas en Bash)
           ALLOWED_AVTD_LIST="southafricanorth australiaeast australiasoutheast centralindia eastasia japaneast japanwest koreacentral southindia southeastasia westindia canadacentral canadaeast francecentral germanywestcentral northeurope norwayeast swedencentral switzerlandnorth uksouth ukwest westeurope uaenorth brazilsouth centralus eastus eastus2 northcentralus southcentralus westus westus2 westus3"
@@ -184,33 +182,21 @@ stages:
           AVTD_JSON=$(printf '%s\n' "${FINAL_AVTD_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
           DSPM_JSON=$(printf '%s\n' "${FINAL_DSPM_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
 
-          echo "Allowed AVTD regions: $ALLOWED_AVTD_LIST"
-          echo "Allowed DSPM regions: $ALLOWED_DSPM_LIST"
+          [[ "$AVTD_JSON" != "[]" ]] && AVTD_ENABLED="true" || AVTD_ENABLED="false"
+          [[ "$DSPM_JSON" != "[]" ]] && DSPM_ENABLED="true" || DSPM_ENABLED="false"
+          AVTD_VAL=$([[ "$AVTD_ENABLED" == "true" ]] && echo "$AVTD_JSON" || echo "null")
+          DSPM_VAL=$([[ "$DSPM_ENABLED" == "true" ]] && echo "$DSPM_JSON" || echo "null")
 
-          echo "AVTD: $AVTD_JSON"
-          echo "DSPM: $DSPM_JSON"
-
-          echo " AVTD Sizing length: $(echo "$AVTD_JSON" | jq length)"
-          echo " DSPM Sizing length: $(echo "$DSPM_JSON" | jq length)"
-
-          if [[ $(echo "$AVTD_JSON" | jq length) -eq 0 ]]; then
-            AVTD_ENABLED="true"
-          fi
-
-          if [[ $(echo "$DSPM_JSON" | jq length) -eq 0 ]]; then
-            DSPM_ENABLED="true"
-          fi
-
-          echo "AVTD_ENABLED: $AVTD_ENABLED"
-          echo "DSPM_ENABLED: $DSPM_ENABLED"
+          echo "AVTD_ENABLED: $AVTD_VAL"
+          echo "DSPM_ENABLED: $DSPM_VAL"
 
           curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
           echo "##vso[task.setvariable variable=AVTD_ENABLED;isOutput=true]$AVTD_ENABLED"
           echo "##vso[task.setvariable variable=DSPM_ENABLED;isOutput=true]$DSPM_ENABLED"
-          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_JSON"
-          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_JSON"
+          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_VAL"
+          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_VAL"
       env:
         SUB_ID: $(SUB_ID)
         REGION: $(MAIN_REGION)
