@@ -358,7 +358,7 @@ stages:
 
           # 6. Comparar y Eliminar Módulos Inactivos
           echo "== Sincronizando Estado con Features =="
-          terraform init -backend=false
+          terraform init
 
           echo "== Estado sincronizado con las features activas =="
           terraform state list
@@ -375,8 +375,8 @@ stages:
                   echo "[ACTIVA] Manteniendo 'module.$FEATURE'."
               fi
           done
-          terraform init -backend=false
-          echo "== Estado sincronizado con las features activas =="
+          terraform init -migrate-state -force-copy
+          echo "== Estado sincronizado con las features activas with new configuration =="
           terraform state list
 
           # 7. Subir el Estado Limpio
