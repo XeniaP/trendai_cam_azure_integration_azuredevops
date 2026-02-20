@@ -2,8 +2,8 @@ trigger:
 - main
 
 variables:
-  AZURE_SERVICE_CONNECTION: 'NAME_OF_YOUR_SERVICE_CONNECTION'
-  SELF_HOSTED_POOL_NAME: 'NAME_OF_YOUR_SELF_HOSTED_POOL' # Optional
+  AZURE_SERVICE_CONNECTION: 'AutomationCAM'
+  SELF_HOSTED_POOL_NAME: 'CAMAutomation' # Optional
   MAX_PARALLEL: 3
   TF_VERSION: '1.14.1'
   #MAIN_REGION: 'eastus'
@@ -18,8 +18,8 @@ stages:
       clean: all
     displayName: Build matrix from Azure subscriptions
     pool:
-      #name: $(SELF_HOSTED_POOL_NAME)
-      vmImage: ubuntu-latest
+      name: $(SELF_HOSTED_POOL_NAME)
+      #vmImage: ubuntu-latest
     steps:
     - checkout: self
     - bash: |
@@ -56,8 +56,8 @@ stages:
     displayName: Run per subscription (parallel)
     dependsOn: build_matrix
     pool:
-      #name: $(SELF_HOSTED_POOL_NAME)
-      vmImage: ubuntu-latest
+      name: $(SELF_HOSTED_POOL_NAME)
+      #vmImage: ubuntu-latest
     workspace:
       clean: all
     strategy:
@@ -122,6 +122,9 @@ stages:
 
           SUB_ID=$(SUB_ID)
           MAIN_REGION=$(MAIN_REGION)
+          FS_ENABLE="true"
+
+          curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           # Listas de regiones permitidas (como strings para comparaciones rápidas en Bash)
           ALLOWED_AVTD_LIST="southafricanorth australiaeast australiasoutheast centralindia eastasia japaneast japanwest koreacentral southindia southeastasia westindia canadacentral canadaeast francecentral germanywestcentral northeurope norwayeast swedencentral switzerlandnorth uksouth ukwest westeurope uaenorth brazilsouth centralus eastus eastus2 northcentralus southcentralus westus westus2 westus3"
@@ -131,60 +134,65 @@ stages:
           get_y1_limit() {
               local sub="$1" reg="$2"
               local out
-              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'dynamic') && contains(name.value,'Linux')].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "0")
-              [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
+              LIMIT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'Y1')].limit | [0]" -o tsv | tr -d '\r')
+              CURRENT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'Y1')].currentValue | [0]" -o tsv | tr -d '\r')
+              echo "=> $sub: The quota limit for Y1 in region $reg is: $LIMIT (current: $CURRENT)"
+              [[ "$LIMIT" =~ ^[0-9]+$ ]] && echo "$LIMIT" || echo "0"
           }
 
           get_basv2_cores_limit() {
               local sub="$1" reg="$2"
               local out
-              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=2023-07-01" --query "value[?name.value=='standardBSv2Family'].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "0")
-              [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
+              LIMIT=$(az quota quota --resource-name "standardBasv2Family" --scope "/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg" --query "properties.limit.value" -o tsv | tr -d '\r')
+              CURRENT=$(az quota quota --resource-name "standardBasv2Family" --scope "/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg" --query "properties.currentValue.value" -o tsv | tr -d '\r')
+              echo "=> $sub: The quota limit for standardBasv2Family cores in region $reg is: $LIMIT (current: $CURRENT)"
+              [[ "$LIMIT" =~ ^[0-9]+$ ]] && echo "$LIMIT" || echo "0"
+          }
+
+          get_ep1_available() {
+              local sub="$1" reg="$2"
+              local out
+              EP1_LIMIT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'EP1')].limit | [0]" -o tsv | tr -d '\r')
+              EP1_CURRENT=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" --query "value[?contains(name.value,'EP1')].currentValue | [0]" -o tsv | tr -d '\r')
+              echo "=> $sub: The quota for EP1 in region $reg is: $EP1_CURRENT / $EP1_LIMIT"
           }
 
           # 1. Chequeo de EP1 en Región Principal
           EP1_AVAILABLE=$(az rest --method get --url "https://management.azure.com/subscriptions/$SUB_ID/providers/Microsoft.Web/locations/$MAIN_REGION/usages?api-version=2024-11-01" --query "value[?name.value=='EP1'] | [0] | currentValue < limit" -o tsv 2>/dev/null || echo "false")
-          #FS_ENABLE=$([ "$EP1_AVAILABLE" == "true" ] && echo "true" || echo "false")
-          FS_ENABLE="true"
+          echo "EP1 availability in main region ($MAIN_REGION): $EP1_AVAILABLE"
+          FS_ENABLE=$([ "$EP1_AVAILABLE" == "true" ] && echo "true" || echo "false")
+          #FS_ENABLE="true"
 
-          # --- PROCESO AVTD ---
-          echo "Procesando regiones AVTD..."
           RAW_AVTD=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.containerregistry/registries') | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
-
+          echo "Regins with AVTD-related resources: $RAW_AVTD"
           FINAL_AVTD_ARRAY=()
           for REG in $RAW_AVTD; do
-              # Solo si la región está en la lista permitida
               if [[ $ALLOWED_AVTD_LIST =~ (^|[[:space:]])$REG($|[[:space:]]) ]]; then
-                  if [ $(get_y1_limit "$SUB_ID" "$REG") -gt 0 ]; then
-                      FINAL_AVTD_ARRAY+=("$REG")
-                  fi
+                FINAL_AVTD_ARRAY+=("$REG")
               fi
           done
 
-          # --- PROCESO DSPM ---
-          echo "Procesando regiones DSPM..."
           RAW_DSPM=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.storage/storageaccounts' | project location | distinct location" --query "data[].location" -o tsv | tr '[:upper:]' '[:lower:]')
-
+          echo "Regins with DSPM-related resources: $RAW_DSPM"
           FINAL_DSPM_ARRAY=()
           for REG in $RAW_DSPM; do
-              # Solo si la región está en la lista permitida
               if [[ $ALLOWED_DSPM_LIST =~ (^|[[:space:]])$REG($|[[:space:]]) ]]; then
-                  if [ $(get_basv2_cores_limit "$SUB_ID" "$REG") -gt 0 ]; then
-                      FINAL_DSPM_ARRAY+=("$REG")
-                  fi
+                FINAL_DSPM_ARRAY+=("$REG")
               fi
           done
 
-          # Convertir a formato JSON para las variables de salida
           AVTD_JSON=$(printf '%s\n' "${FINAL_AVTD_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
           DSPM_JSON=$(printf '%s\n' "${FINAL_DSPM_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
 
-          echo "Resultados finales:"
-          echo "AVTD: $AVTD_JSON"
-          echo "DSPM: $DSPM_JSON"
+          echo "Final AVTD regions after filtering: $AVTD_JSON"
+          echo "Final DSPM regions after filtering: $DSPM_JSON"
 
-          # Variables de salida para Azure DevOps
+          [[ "$AVTD_JSON" != "[]" ]] && AVTD_ENABLED="true" || AVTD_ENABLED="false"
+          [[ "$DSPM_JSON" != "[]" ]] && DSPM_ENABLED="true" || DSPM_ENABLED="false"
+
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
+          echo "##vso[task.setvariable variable=AVTD_ENABLED;isOutput=true]$AVTD_ENABLED"
+          echo "##vso[task.setvariable variable=DSPM_ENABLED;isOutput=true]$DSPM_ENABLED"
           echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_JSON"
           echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_JSON"
       env:
@@ -201,11 +209,25 @@ stages:
         inlineScript: |
           set -euo pipefail
           
-          echo "== Setting Features Environment =="
+          # Capturamos los valores (que vienen como [reg1,reg2])
+          RAW_AVTD=$(CheckQuota.DEPLOY_AVTD_REGIONS)
+          RAW_DSPM=$(CheckQuota.DEPLOY_DSPM_REGIONS)
+
+          # FUNCIÓN MÁGICA: Convierte el texto [a,b] en JSON real ["a","b"]
+          to_clean_json() {
+            local input="$1"
+            echo "$input" | tr -d '[]' | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | jq -R . | jq -s -c .
+          }
+
+          export AVTD_REGIONS=$(to_clean_json "$RAW_AVTD")
+          export DSPM_REGIONS=$(to_clean_json "$RAW_DSPM")
           export FS_STATUS=$(CheckQuota.FS_ENABLE)
-          export AVTD_REGIONS=$(CheckQuota.DEPLOY_AVTD_REGIONS)
-          export DSPM_REGIONS=$(CheckQuota.DEPLOY_DSPM_REGIONS)
+          export AVTD_ENABLED=$(CheckQuota.AVTD_ENABLED)
+          export DSPM_ENABLED=$(CheckQuota.DSPM_ENABLED)
+
           echo "FS_STATUS: $FS_STATUS"
+          echo "AVTD_ENABLED: $AVTD_ENABLED"
+          echo "DSPM_ENABLED: $DSPM_ENABLED"
           echo "AVTD_REGIONS: $AVTD_REGIONS"
           echo "DSPM_REGIONS: $DSPM_REGIONS"
 
@@ -221,7 +243,13 @@ stages:
           
           unzip -o "$PKG_ZIP" -d "$PKG_DIR"
 
-          #cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications
+          function remove_feature_module_block() {
+              local feature=$1
+              echo "== Optimizing FEATURES list removing $feature =="
+              CURRENT_FEATURES=$(grep "export FEATURES=" "$PKG_DIR/deploy.sh" | cut -d"'" -f2)
+              UPDATED_FEATURES=$(echo "$CURRENT_FEATURES" | jq -c 'map(select(. != "'"$feature"'"))')
+              sed -i "s|export FEATURES=.*|export FEATURES='$UPDATED_FEATURES'|" "$PKG_DIR/deploy.sh"
+          }
 
           echo "== Override Configuration according environment characteristics =="
           find "$PKG_DIR" -maxdepth 2 -type f -name "*.sh" -print
@@ -232,37 +260,60 @@ stages:
           sed -i "s|^export CLOUD_ACCOUNT_NAME=.*|export CLOUD_ACCOUNT_NAME=\"${CLOUD_ACCOUNT_NAME}\"|g" "$PKG_DIR/deploy.sh" || true
           sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
           sed -i 's/default *= *true/default = false/g' "$PKG_DIR/cam/variables.tf"
-          #sed -i 's/version *= *"=4.3.0"/version = "3.116.0"/g' "$PKG_DIR/main.tf"
-          #sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${STORAGE_ACCOUNT}\"|g" "$PKG_DIR/main.tf" || true
+          remove_feature_module_block "azure-activity-log"
 
-          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content before modifications
-
-          echo "== Setting custom configuration for Data Security Posture Management =="
-          REGIONS_COUNT_DSPM=$(echo "$DSPM_REGIONS" | jq 'length')
-          if [[ $REGIONS_COUNT_DSPM -eq 0 ]]; then
-            sed -i '/module "data-security-posture-management" {/,/^[[:space:]]*}/ s/^/#/' "$PKG_DIR/main.tf"
-            
-            DSPM_VAL=$(echo "[]")
-            NEW_ARRAY='"data-security-posture-management": [],'
-            sed -i '/"data-security-posture-management": \[/,/\],/c\'"$NEW_ARRAY" "$PKG_DIR/deploy.sh"
-            sed -i '/"data-security-posture-management"[[:space:]]*:[[:space:]]*null,/d' "$PKG_DIR/deploy.sh"
-            sed -i '/"data-security-posture-management"[[:space:]]*:/d' "$PKG_DIR/deploy.sh"
-            CURRENT=$(grep '^export FEATURES=' "$PKG_DIR/deploy.sh" | cut -d"'" -f2)
-            UPDATED=$(echo "$CURRENT" | jq -c 'map(select(. != "data-security-posture-management"))')
-            sed -i "s|^export FEATURES=.*|export FEATURES='$UPDATED'|" "$PKG_DIR/deploy.sh"
-          else
-              NEW_ARRAY='"data-security-posture-management": '"$DSPM_REGIONS",'
-              sed -i '/"data-security-posture-management": \[/,/\],/c\'"$NEW_ARRAY" "$PKG_DIR/deploy.sh"
+          if [[ "$AVTD_ENABLED" != "true" ]]; then
+            remove_feature_module_block "cloud-sentry"
           fi
+
+          if [[ "$DSPM_ENABLED" != "true" ]]; then
+            remove_feature_module_block "data-security-posture-management"
+          fi
+          
+          python3 -c "
+          import os, json, re
+          pkg_dir = os.environ.get('PKG_DIR', '.')
+          file_path = os.path.join(pkg_dir, 'deploy.sh')
+
+          try:
+
+              avtd = [r.strip() for r in json.loads(os.environ.get('AVTD_REGIONS', '[]')) if r and str(r).strip()]
+              dspm = [r.strip() for r in json.loads(os.environ.get('DSPM_REGIONS', '[]')) if r and str(r).strip()]
+
+              features_data = {
+                'file-storage-security': None,
+                'real-time-posture-monitoring': None
+              }
+              if len(avtd) > 0:
+                features_data['cloud-sentry'] = avtd
+              if len(dspm) > 0:
+                features_data['data-security-posture-management'] = dspm
+              print(f'[DEBUG] Prepared features data: {features_data}')
+              json_str = json.dumps(features_data)
+              new_export_line = f\"export FEATURES_DEPLOYED_REGIONS='{json_str}'\"
+              file_path = os.path.join(os.environ.get('PKG_DIR', '.'), 'deploy.sh')
+              if os.path.exists(file_path):
+                with open(file_path, 'r') as f:
+                  content = f.read()
+                pattern = r\"export FEATURES_DEPLOYED_REGIONS='.*?'\"
+                new_content = re.sub(pattern, new_export_line, content, flags=re.DOTALL)  
+                with open(file_path, 'w') as f:
+                  f.write(new_content)
+                print(f'[SUCCESS] Archivo {file_path} actualizado con nulls correctos.')
+              else:
+                print(f'[ERROR] No existe el archivo: {file_path}')
+
+          except Exception as e:
+              print(f'[CRITICAL ERROR] {e}')
+          "
+
+          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content after JSON injection
 
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
             echo "== File Storage Security will be disabled due to lack of EP1 quota in the main region =="
-            sed -i '/module "file-storage-security" {/,/  }/ s/^/#/' "$PKG_DIR/main.tf"
+            remove_feature_module_block "file-storage-security"
             sed -i '/"file-storage-security"[[:space:]]*:[[:space:]]*null,/d' "$PKG_DIR/deploy.sh"
-            CURRENT=$(grep '^export FEATURES=' "$PKG_DIR/deploy.sh" | cut -d"'" -f2)
-            UPDATED=$(echo "$CURRENT" | jq -c 'map(select(. != "file-storage-security"))')
-            sed -i "s|^export FEATURES=.*|export FEATURES='$UPDATED'|" "$PKG_DIR/deploy.sh"
           else
             echo "== Additional Configuration for File Storage Security =="
             if [[ -n "${STORAGE_ACCOUNT:-}" ]]; then
@@ -271,31 +322,11 @@ stages:
             fi
           fi
 
-          cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 4 
-          echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
-          REGIONS_COUNT_AVTD=$(echo "$AVTD_REGIONS" | jq 'length')
-          if [[ $REGIONS_COUNT_AVTD -eq 0 ]]; then
-              sed -i '/module "cloud-sentry" {/,/^  }/ s/^/# /' "$PKG_DIR/main.tf"
-              AVTD_VAL=$(echo "[]")
-              NEW_ARRAY='"cloud-sentry": [],'
-              sed -i '/"cloud-sentry": \[/,/\],/c\'"$NEW_ARRAY" "$PKG_DIR/deploy.sh"
-              sed -i '/"cloud-sentry"[[:space:]]*:[[:space:]]*null,/d' "$PKG_DIR/deploy.sh"
-              sed -i '/"cloud-sentry"[[:space:]]*:/d' "$PKG_DIR/deploy.sh"
-              CURRENT=$(grep '^export FEATURES=' "$PKG_DIR/deploy.sh" | cut -d"'" -f2)
-              UPDATED=$(echo "$CURRENT" | jq -c 'map(select(. != "cloud-sentry"))')
-              sed -i "s|^export FEATURES=.*|export FEATURES='$UPDATED'|" "$PKG_DIR/deploy.sh"
-          else
-              NEW_ARRAY='"cloud-sentry": '"$AVTD_REGIONS",'
-              sed -i '/"cloud-sentry": \[/,/\],/c\'"$NEW_ARRAY" "$PKG_DIR/deploy.sh"
-          fi
+          echo "== DEBUG DEPLOY.SH =="
+          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content after modifications
 
-          #cat "$PKG_DIR/main.tf"  # Debug: Check original main.tf content before modifications 5
           echo "== Setting the subscription context =="
           az account set --subscription "$SUB_ID"
-
-          #Only for debug, to check the generated configuration files before deployment. Can be removed later.
-          #cat "$PKG_DIR/deploy.sh"
-          #cat "$PKG_DIR/main.tf"
 
           echo "== Setting authentication parameters =="
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
@@ -318,6 +349,8 @@ stages:
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
           export TF_LOG=ERROR
+          sed -i 's/tf_auto_approve_flag="/tf_auto_approve_flag=" -parallelism=30 -refresh=false /g' ./functions.sh
+          cat ./functions.sh  # Debug: Check functions.sh content after modifications
           ./deploy.sh
       env:
         SUB_ID: $(SUB_ID)
