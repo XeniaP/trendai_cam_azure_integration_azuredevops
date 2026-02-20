@@ -185,6 +185,8 @@ stages:
 
           echo "AVTD: $AVTD_JSON"
           echo "DSPM: $DSPM_JSON"
+          
+          curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
           echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_JSON"
@@ -358,10 +360,7 @@ stages:
 
           # 6. Comparar y Eliminar Módulos Inactivos
           echo "== Sincronizando Estado con Features =="
-          terraform init
-
-          echo "== Estado sincronizado con las features activas =="
-          terraform state list
+          terraform init --backend=false
 
           for FEATURE in "${ALL_FEATURES[@]}"; do
               # Verificamos si la feature NO está en el JSON de activas
@@ -375,9 +374,8 @@ stages:
                   echo "[ACTIVA] Manteniendo 'module.$FEATURE'."
               fi
           done
-          terraform init -migrate-state -force-copy
-          echo "== Estado sincronizado con las features activas with new configuration =="
-          terraform state list
+
+          az
 
           # 7. Subir el Estado Limpio
           echo "== Actualizando Estado en Azure =="
