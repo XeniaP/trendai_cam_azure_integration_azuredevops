@@ -331,7 +331,8 @@ stages:
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
           export TF_LOG=ERROR
-          sed -i 's/tf_auto_approve_flag="/tf_auto_approve_flag=" -parallelism=30 -refresh=false /g' ./functions.sh | grep "tf_auto_approve_flag="
+          sed -i 's/tf_auto_approve_flag="/tf_auto_approve_flag=" -parallelism=30 -refresh=false /g' ./functions.sh
+          cat ./functions.sh  # Debug: Check functions.sh content after modifications
           ./deploy.sh
       env:
         SUB_ID: $(SUB_ID)
