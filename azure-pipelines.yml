@@ -291,19 +291,17 @@ stages:
               print(f'[DEBUG] Prepared features data: {features_data}')
               json_str = json.dumps(features_data)
               new_export_line = f\"export FEATURES_DEPLOYED_REGIONS='{json_str}'\"
+              file_path = os.path.join(os.environ.get('PKG_DIR', '.'), 'deploy.sh')
               if os.path.exists(file_path):
-                  with open(file_path, 'r') as f:
-                      content = f.read()
-                  pattern = r\"export FEATURES_DEPLOYED_REGIONS='.*?'\"
-                  if re.search(pattern, content, flags=re.DOTALL):
-                      updated_content = re.sub(pattern, new_export_line, content, flags=re.DOTALL)
-                      with open(file_path, 'w') as f:
-                          f.write(updated_content)
-                      print(f'[SUCCESS] Archivo {file_path} actualizado.')
-                  else:
-                      print('[ERROR] No se encontró la variable FEATURES_DEPLOYED_REGIONS.')
+                with open(file_path, 'r') as f:
+                  content = f.read()
+                pattern = r\"export FEATURES_DEPLOYED_REGIONS='.*?'\"
+                new_content = re.sub(pattern, new_export_line, content, flags=re.DOTALL)  
+                with open(file_path, 'w') as f:
+                  f.write(new_content)
+                print(f'[SUCCESS] Archivo {file_path} actualizado con nulls correctos.')
               else:
-                  print(f'[ERROR] No existe el archivo: {file_path}')
+                print(f'[ERROR] No existe el archivo: {file_path}')
 
           except Exception as e:
               print(f'[CRITICAL ERROR] {e}')
