@@ -182,6 +182,9 @@ stages:
           AVTD_JSON=$(printf '%s\n' "${FINAL_AVTD_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
           DSPM_JSON=$(printf '%s\n' "${FINAL_DSPM_ARRAY[@]:-}" | jq -R . | jq -s -c 'map(select(. != ""))')
 
+          echo "Final AVTD regions after filtering: $AVTD_JSON"
+          echo "Final DSPM regions after filtering: $DSPM_JSON"
+
           [[ "$AVTD_JSON" != "[]" ]] && AVTD_ENABLED="true" || AVTD_ENABLED="false"
           [[ "$DSPM_JSON" != "[]" ]] && DSPM_ENABLED="true" || DSPM_ENABLED="false"
 
@@ -190,8 +193,8 @@ stages:
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
           echo "##vso[task.setvariable variable=AVTD_ENABLED;isOutput=true]$AVTD_ENABLED"
           echo "##vso[task.setvariable variable=DSPM_ENABLED;isOutput=true]$DSPM_ENABLED"
-          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$FINAL_AVTD_ARRAY"
-          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$FINAL_DSPM_ARRAY"
+          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_JSON"
+          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_JSON"
       env:
         SUB_ID: $(SUB_ID)
         REGION: $(MAIN_REGION)
