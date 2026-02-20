@@ -288,13 +288,20 @@ stages:
           try:
               avtd = json.loads(os.environ.get('AVTD_REGIONS', '[]'))
               dspm = json.loads(os.environ.get('DSPM_REGIONS', '[]'))
-              
+
               features_data = {
-                  'cloud-sentry': avtd,
-                  'data-security-posture-management': dspm,
                   'file-storage-security': None,
                   'real-time-posture-monitoring': None
               }
+
+              if len(avtd) > 0:
+                  features_data['cloud-sentry'] = avtd
+
+              if len(dspm) > 0:
+                  features_data['data-security-posture-management'] = dspm
+              
+              print(f'[DEBUG] Prepared features data: {features_data}')
+
               json_str = json.dumps(features_data)
               new_export_line = f\"export FEATURES_DEPLOYED_REGIONS='{json_str}'\"
               if os.path.exists(file_path):
