@@ -122,6 +122,9 @@ stages:
 
           SUB_ID=$(SUB_ID)
           MAIN_REGION=$(MAIN_REGION)
+          FS_ENABLE="true"
+          AVTD_ENABLED="false"
+          DSPM_ENABLED="false"
 
           # Listas de regiones permitidas (como strings para comparaciones rápidas en Bash)
           ALLOWED_AVTD_LIST="southafricanorth australiaeast australiasoutheast centralindia eastasia japaneast japanwest koreacentral southindia southeastasia westindia canadacentral canadaeast francecentral germanywestcentral northeurope norwayeast swedencentral switzerlandnorth uksouth ukwest westeurope uaenorth brazilsouth centralus eastus eastus2 northcentralus southcentralus westus westus2 westus3"
@@ -190,9 +193,19 @@ stages:
           echo " AVTD Sizing length: $(echo "$AVTD_JSON" | jq length)"
           echo " DSPM Sizing length: $(echo "$DSPM_JSON" | jq length)"
 
+          if [[ $(echo "$AVTD_JSON" | jq length) -eq 0 ]]; then
+            AVTD_ENABLED="true"
+          fi
+
+          if [[ $(echo "$DSPM_JSON" | jq length) -eq 0 ]]; then
+            DSPM_ENABLED="true"
+          fi
+
           curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
+          echo "##vso[task.setvariable variable=AVTD_ENABLED;isOutput=true]$AVTD_ENABLED"
+          echo "##vso[task.setvariable variable=DSPM_ENABLED;isOutput=true]$DSPM_ENABLED"
           echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_JSON"
           echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_JSON"
       env:
@@ -223,6 +236,8 @@ stages:
           export AVTD_REGIONS=$(to_clean_json "$RAW_AVTD")
           export DSPM_REGIONS=$(to_clean_json "$RAW_DSPM")
           export FS_STATUS=$(CheckQuota.FS_ENABLE)
+          export AVTD_ENABLED=$(CheckQuota.AVTD_ENABLED)
+          export DSPM_ENABLED=$(CheckQuota.DSPM_ENABLED)
 
           echo "FS_STATUS: $FS_STATUS"
           echo "AVTD_REGIONS: $AVTD_REGIONS" # Ahora saldrá con ["..."]
@@ -259,7 +274,13 @@ stages:
           sed -i 's/default *= *true/default = false/g' "$PKG_DIR/cam/variables.tf"
           remove_feature_module_block "azure-activity-log"
 
+          if [[ "$AVTD_ENABLED" != "true" ]]; then
+            remove_feature_module_block "cloud-sentry"
+          fi
 
+          if [[ "$DSPM_ENABLED" != "true" ]]; then
+            remove_feature_module_block "data-security-posture-management"
+          fi
           
           python3 -c "
           import os, json, re
