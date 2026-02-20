@@ -184,19 +184,14 @@ stages:
 
           [[ "$AVTD_JSON" != "[]" ]] && AVTD_ENABLED="true" || AVTD_ENABLED="false"
           [[ "$DSPM_JSON" != "[]" ]] && DSPM_ENABLED="true" || DSPM_ENABLED="false"
-          AVTD_VAL=$([[ "$AVTD_ENABLED" == "true" ]] && echo "$AVTD_JSON" || echo "null")
-          DSPM_VAL=$([[ "$DSPM_ENABLED" == "true" ]] && echo "$DSPM_JSON" || echo "null")
-
-          echo "AVTD_ENABLED: $AVTD_VAL"
-          echo "DSPM_ENABLED: $DSPM_VAL"
 
           curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
           echo "##vso[task.setvariable variable=AVTD_ENABLED;isOutput=true]$AVTD_ENABLED"
           echo "##vso[task.setvariable variable=DSPM_ENABLED;isOutput=true]$DSPM_ENABLED"
-          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_VAL"
-          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_VAL"
+          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$FINAL_AVTD_ARRAY"
+          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$FINAL_DSPM_ARRAY"
       env:
         SUB_ID: $(SUB_ID)
         REGION: $(MAIN_REGION)
