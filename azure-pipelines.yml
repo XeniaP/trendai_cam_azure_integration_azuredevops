@@ -335,7 +335,7 @@ stages:
           CONTAINER_PREFIX="camtfstate"
           BLOB_NAME="terraform.tfstate"
           LOCAL_STATE="terraform.tfstate"
-          DEPLOY_SH="$PKG_DIR/deploy.sh"
+          DEPLOY_SH="deploy.sh"
 
           # 2. Definir el Universo Total de Features (Módulos)
           # Agrega aquí todos los nombres de módulos que existen en tu Terraform
