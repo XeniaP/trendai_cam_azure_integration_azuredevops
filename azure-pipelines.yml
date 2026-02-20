@@ -288,8 +288,8 @@ stages:
               "file-storage-security": null,
               "real-time-posture-monitoring": null
             }')
-          echo "New FEATURES_DEPLOYED_REGIONS value: $NEW_JSON_VALUE"
-          perl -i -0777 -pe "s/export FEATURES_DEPLOYED_REGIONS='\{.*?\}'/export FEATURES_DEPLOYED_REGIONS='$NEW_JSON_VALUE'/s" "$PKG_DIR/deploy.sh"
+          ESCAPED_JSON=$(echo "$NEW_JSON_VALUE" | sed 's/[&/\]/\\&/g')
+          sed -i "s|export FEATURES_DEPLOYED_REGIONS=.*|export FEATURES_DEPLOYED_REGIONS='$ESCAPED_JSON'|g" "$PKG_DIR/deploy.sh"
 
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
