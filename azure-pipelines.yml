@@ -281,8 +281,8 @@ stages:
               dspm = [r.strip() for r in json.loads(os.environ.get('DSPM_REGIONS', '[]')) if r and str(r).strip()]
 
               features_data = {
-                'file-storage-security': None,
-                'real-time-posture-monitoring': None
+                'file-storage-security': Null,
+                'real-time-posture-monitoring': Null
               }
               if len(avtd) > 0:
                 features_data['cloud-sentry'] = avtd
