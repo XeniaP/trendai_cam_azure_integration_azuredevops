@@ -185,7 +185,7 @@ stages:
 
           echo "AVTD: $AVTD_JSON"
           echo "DSPM: $DSPM_JSON"
-          
+
           curl -sL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/main/clean_cam_azure.sh | DRY_RUN=0 SUBSCRIPTION_ID="$SUB_ID" bash
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
@@ -330,59 +330,6 @@ stages:
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
           export TF_LOG=ERROR
-          #./deploy.sh
-
-          # 1. Definición de Prefijos y Variables
-          SA_PREFIX="camtfstatestorage"
-          CONTAINER_PREFIX="camtfstate"
-          BLOB_NAME="terraform.tfstate"
-          LOCAL_STATE="terraform.tfstate"
-          DEPLOY_SH="deploy.sh"
-
-          # 2. Definir el Universo Total de Features (Módulos)
-          # Agrega aquí todos los nombres de módulos que existen en tu Terraform
-          ALL_FEATURES=("cloud-sentry" "data-security-posture-management" "file-storage-security" "real-time-posture-monitoring" "azure-activity-log")
-
-          echo "== Identificando Features Activas en deploy.sh =="
-          ACTIVE_FEATURES_JSON=$(grep "export FEATURES=" "$DEPLOY_SH" | cut -d"'" -f2)
-          echo "Features activas detectadas: $ACTIVE_FEATURES_JSON"
-          echo "All Features: ${ALL_FEATURES[*]}"
-          STORAGE_ACCOUNT=$(az storage account list --query "[?starts_with(name, '$SA_PREFIX')].name | [0]" -o tsv | tr -d '\r')
-          CONTAINER_NAME=$(az storage container list --account-name "$STORAGE_ACCOUNT" --query "[?starts_with(name, '$CONTAINER_PREFIX')].name | [0]" -o tsv | tr -d '\r')
-
-          if [[ -z "$STORAGE_ACCOUNT" || -z "$CONTAINER_NAME" ]]; then
-              echo "ERROR: No se encontró la infraestructura de estado."
-              exit 1
-          fi
-
-          # 5. Descargar el Estado Actual
-          az storage blob download --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER_NAME" --name "$BLOB_NAME" --file "$LOCAL_STATE" --overwrite --no-progress
-
-          # 6. Comparar y Eliminar Módulos Inactivos
-          echo "== Sincronizando Estado con Features =="
-          terraform init --backend=false
-
-          for FEATURE in "${ALL_FEATURES[@]}"; do
-              # Verificamos si la feature NO está en el JSON de activas
-              IS_ACTIVE=$(echo "$ACTIVE_FEATURES_JSON" | jq -r ". | contains([\"$FEATURE\"])")
-              
-              if [ "$IS_ACTIVE" == "false" ]; then
-                  echo "[INACTIVA] Removiendo módulo 'module.$FEATURE' del estado..."
-                  # Intentamos remover tanto el nombre de la feature como el nombre técnico del módulo
-                  terraform state rm "module.$FEATURE" 2>/dev/null || echo "Info: module.$FEATURE no estaba en el estado."
-              else
-                  echo "[ACTIVA] Manteniendo 'module.$FEATURE'."
-              fi
-          done
-
-          az
-
-          # 7. Subir el Estado Limpio
-          echo "== Actualizando Estado en Azure =="
-          az storage blob upload --account-name "$STORAGE_ACCOUNT" --container-name "$CONTAINER_NAME" --name "$BLOB_NAME" --file "$LOCAL_STATE" --overwrite
-
-          echo "Sincronización finalizada el $(date)."
-          echo "Executing deployment script..."
           ./deploy.sh
       env:
         SUB_ID: $(SUB_ID)
