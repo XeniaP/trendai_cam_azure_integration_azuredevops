@@ -262,8 +262,9 @@ stages:
           file_path = os.path.join(pkg_dir, 'deploy.sh')
 
           try:
-              avtd = json.loads(os.environ.get('AVTD_REGIONS', '[]'))
-              dspm = json.loads(os.environ.get('DSPM_REGIONS', '[]'))
+
+              avtd = [r.strip() for r in json.loads(os.environ.get('AVTD_REGIONS', '[]')) if r and str(r).strip()]
+              dspm = [r.strip() for r in json.loads(os.environ.get('DSPM_REGIONS', '[]')) if r and str(r).strip()]
 
               features_data = {
                 'file-storage-security': None,
