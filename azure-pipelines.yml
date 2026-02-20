@@ -156,6 +156,7 @@ stages:
 
           # 1. Chequeo de EP1 en Región Principal
           EP1_AVAILABLE=$(az rest --method get --url "https://management.azure.com/subscriptions/$SUB_ID/providers/Microsoft.Web/locations/$MAIN_REGION/usages?api-version=2024-11-01" --query "value[?name.value=='EP1'] | [0] | currentValue < limit" -o tsv 2>/dev/null || echo "false")
+          echo "EP1 availability in main region ($MAIN_REGION): $EP1_AVAILABLE"
           #FS_ENABLE=$([ "$EP1_AVAILABLE" == "true" ] && echo "true" || echo "false")
           FS_ENABLE="true"
 
@@ -330,6 +331,7 @@ stages:
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
           export TF_LOG=ERROR
+          sed -i 's/tf_auto_approve_flag="/tf_auto_approve_flag=" -parallelism=30 -refresh=false /g' ./functions.sh | grep "tf_auto_approve_flag="
           ./deploy.sh
       env:
         SUB_ID: $(SUB_ID)
