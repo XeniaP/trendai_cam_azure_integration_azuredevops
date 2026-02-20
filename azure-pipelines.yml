@@ -255,30 +255,6 @@ stages:
           sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
           sed -i 's/default *= *true/default = false/g' "$PKG_DIR/cam/variables.tf"
           remove_feature_module_block "azure-activity-log"
-
-          echo "== Setting custom configuration for Data Security Posture Management =="
-          VALID_DSPM_COUNT=$(echo "$DSPM_REGIONS" | jq '[.[] | select(. != "")] | length' 2>/dev/null || echo 0)
-          if [[ -z "$DSPM_REGIONS" || "$VALID_DSPM_COUNT" -eq 0 ]]; then
-            REGIONS_COUNT_DSPM=0
-            sed -i 's/"data-security-posture-management": .*/"data-security-posture-management": [],/' "$PKG_DIR/deploy.sh"
-            remove_feature_module_block "data-security-posture-management"
-            DSPM_JSON="[]"
-          else
-            echo "DSPM will be deployed in the following regions: $DSPM_REGIONS"
-            DSPM_JSON=$(echo "$DSPM_REGIONS" | jq -c .)
-          fi
-
-          echo "== Setting custom configuration for Agentless Vulnerability & Threat Detection =="
-          VALID_AVTD_COUNT=$(echo "$AVTD_REGIONS" | jq '[.[] | select(. != "")] | length' 2>/dev/null || echo 0)
-          if [[ -z "$AVTD_REGIONS" || "$VALID_AVTD_COUNT" -eq 0 ]]; then
-              REGIONS_COUNT_AVTD=0
-              sed -i 's/"cloud-sentry": .*/"cloud-sentry": [],/' "$PKG_DIR/deploy.sh"
-              remove_feature_module_block "cloud-sentry"
-              AVTD_JSON="[]"
-          else
-              echo "AVTD will be deployed in the following regions: $AVTD_REGIONS"
-              AVTD_JSON=$(echo "$AVTD_REGIONS" | jq -c .)
-          fi
           
           python3 -c "
           import os, json, re
@@ -290,18 +266,14 @@ stages:
               dspm = json.loads(os.environ.get('DSPM_REGIONS', '[]'))
 
               features_data = {
-                  'file-storage-security': None,
-                  'real-time-posture-monitoring': None
+                'file-storage-security': None,
+                'real-time-posture-monitoring': None
               }
-
               if len(avtd) > 0:
-                  features_data['cloud-sentry'] = avtd
-
+                features_data['cloud-sentry'] = avtd
               if len(dspm) > 0:
-                  features_data['data-security-posture-management'] = dspm
-              
+                features_data['data-security-posture-management'] = dspm
               print(f'[DEBUG] Prepared features data: {features_data}')
-
               json_str = json.dumps(features_data)
               new_export_line = f\"export FEATURES_DEPLOYED_REGIONS='{json_str}'\"
               if os.path.exists(file_path):
@@ -321,6 +293,8 @@ stages:
           except Exception as e:
               print(f'[CRITICAL ERROR] {e}')
           "
+
+          cat "$PKG_DIR/deploy.sh"  # Debug: Check deploy.sh content after JSON injection
 
           echo "== Setting custom configuration for File Storage Security =="
           if [[ "$FS_STATUS" == "false" ]]; then
