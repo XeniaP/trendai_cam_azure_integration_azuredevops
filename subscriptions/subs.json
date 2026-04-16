@@ -2,6 +2,7 @@
   {
     "id": "",
     "name": "Project1",
-    "storage_account": ""
+    "storage_account": "",
+    "main_region":""
   }
 ]
