@@ -275,7 +275,8 @@ stages:
           fi
           echo "== Configure File Security Quarantine Storage =="
           STORAGE_NAME="{\"global\": \"${STORAGE_ACCOUNT}\"}"
-          sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${STORAGE_NAME}\"|g" "$PKG_DIR/main.tf"
+          SED_VALUE=$(printf '%s' "$STORAGE_NAME" | sed 's/"/\\\\"/g')
+          sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${SED_VALUE}\"|g" "$PKG_DIR/main.tf"
           cat $PKG_DIR/main.tf
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
