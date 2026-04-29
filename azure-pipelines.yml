@@ -6,6 +6,7 @@ variables:
   SELF_HOSTED_POOL_NAME: 'NAME_OF_YOUR_SELF_HOSTED_POOL' # Optional
   MAX_PARALLEL: 3
   TF_VERSION: '1.14.1'
+  MAIN_REGION: 'eastus'
 
 stages:
 - stage: deploy
@@ -38,8 +39,7 @@ stages:
           matrix[key] = {
               "SUB_NAME": s["name"],
               "SUB_ID": s["id"],
-              "STORAGE_ACCOUNT": s["storage_account"],
-              "MAIN_REGION": s["main_region"]
+              "STORAGE_ACCOUNT": s["storage_account"]
           }
         print("##vso[task.setvariable variable=MATRIX;isOutput=true]" + json.dumps(matrix))
         PY
@@ -257,6 +257,7 @@ stages:
           mkdir -p "$PKG_DIR"
           curl https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/Modules/Azure/Integration_in_pipeline/requestTemplateforTrendAI.py | python
           echo "== Setting authentication parameters =="
+          az account set --subscription "$SUB_ID"
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
           export ARM_TENANT_ID="$tenantId"
           export ARM_CLIENT_ID="$servicePrincipalId"
@@ -278,6 +279,11 @@ stages:
           SED_VALUE=$(printf '%s' "$STORAGE_NAME" | sed 's/"/\\\\"/g')
           sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${SED_VALUE}\"|g" "$PKG_DIR/main.tf"
           cat $PKG_DIR/main.tf
+          echo "== Patching cam/variables.tf: is_user_account default true -> false =="
+          sed -i '/variable "is_user_account"/,/}/{s/default *= *true/default = false/}' \
+            "$PKG_DIR/cam/variables.tf"
+          grep -A5 'is_user_account' "$PKG_DIR/cam/variables.tf"
+          sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
           echo "== Deploying with Terraform =="
           cd "$PKG_DIR"
           sudo chmod +x deploy.sh
@@ -289,4 +295,5 @@ stages:
         CLOUD_ACCOUNT_NAME: "$(SUB_NAME)"
         V1_API_KEY: $(V1_API_KEY)
         SWP_INSTANCE: $(SWP_INSTANCE)
-        MAIN_REGION: $(MAIN_REGION)
+        TF_VAR_is_user_account: false
+
