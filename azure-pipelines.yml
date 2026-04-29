@@ -278,7 +278,6 @@ stages:
           STORAGE_NAME="{\"global\": \"${STORAGE_ACCOUNT}\"}"
           SED_VALUE=$(printf '%s' "$STORAGE_NAME" | sed 's/"/\\\\"/g')
           sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${SED_VALUE}\"|g" "$PKG_DIR/main.tf"
-          cat $PKG_DIR/main.tf
           echo "== Patching cam/variables.tf: is_user_account default true -> false =="
           sed -i '/variable "is_user_account"/,/}/{s/default *= *true/default = false/}' \
             "$PKG_DIR/cam/variables.tf"
