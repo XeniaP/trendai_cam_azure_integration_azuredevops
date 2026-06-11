@@ -45,8 +45,7 @@ stages:
           matrix[key] = {
               "SUB_NAME": s["name"],
               "SUB_ID": s["id"],
-              "STORAGE_ACCOUNT": s["storage_account"],
-              "SUB_MAIN_REGION": s.get("main_region", "")
+              "STORAGE_ACCOUNT": s["storage_account"]
           }
         print("##vso[task.setvariable variable=MATRIX;isOutput=true]" + json.dumps(matrix))
         PY
@@ -103,40 +102,69 @@ stages:
     # ── Step 1b: Discover main region from Vision One CAM ─────────────────────
     #   Queries the Vision One Cloud Account Management API for this Azure
     #   subscription and reads camDeployedRegion (the region V1 recorded at
-    #   import time). Falls back to subs.json main_region, then to
-    #   DEFAULT_MAIN_REGION. Sets the MAIN_REGION job variable consumed by the
-    #   CheckQuota and Deploy steps below.
+    #   import time). Falls back to DEFAULT_MAIN_REGION when V1 has no value.
+    #   Sets the MAIN_REGION job variable consumed by the CheckQuota and
+    #   Deploy steps below.
     - bash: |
         set -euo pipefail
 
         SUB_ID="$(SUB_ID)"
-        SUB_MAIN_REGION="$(SUB_MAIN_REGION)"
         DEFAULT_REGION="$(DEFAULT_MAIN_REGION)"
         API_BASE="$(V1_API_BASE_URL)"
 
         DISCOVERED=""
+        URL="${API_BASE}/beta/cam/azureSubscriptions/${SUB_ID}"
         echo "== Querying Vision One CAM for subscription $SUB_ID =="
-        RESP=$(curl -fsS \
+        echo "  GET $URL"
+
+        if [[ -z "${V1_API_KEY:-}" ]]; then
+          echo "  [WARN] V1_API_KEY is EMPTY in this job. If it is a secret pipeline"
+          echo "         variable or comes from a variable group, ensure it is mapped"
+          echo "         to env (it is, via the step 'env:' block) and that the group"
+          echo "         is linked to this pipeline. Falling back to default region."
+        else
+          echo "  V1_API_KEY length: ${#V1_API_KEY} (value masked)"
+        fi
+
+        BODY_FILE="$(mktemp)"
+        HDR_FILE="$(mktemp)"
+        set +e
+        HTTP_CODE=$(curl -sS -o "$BODY_FILE" -D "$HDR_FILE" -w '%{http_code}' \
           -H "Authorization: Bearer ${V1_API_KEY}" \
           -H "Accept: application/json" \
-          "${API_BASE}/beta/cam/azureSubscriptions/${SUB_ID}" 2>/dev/null || echo "")
+          "$URL")
+        CURL_EXIT=$?
+        set -e
+        [[ -z "$HTTP_CODE" ]] && HTTP_CODE="000"
+        RESP=$(cat "$BODY_FILE" 2>/dev/null || echo "")
 
-        if [[ -n "$RESP" ]]; then
-          DISCOVERED=$(echo "$RESP" | jq -r '.camDeployedRegion // empty' 2>/dev/null | tr -d '\r')
-        else
-          echo "  [WARN] No response from Vision One CAM API (subscription not imported, "
-          echo "         wrong region host, or invalid key). Falling back."
-        fi
+        echo "  ----- DEBUG: Vision One CAM API response -----"
+        echo "  curl exit code: $CURL_EXIT"
+        echo "  HTTP status: $HTTP_CODE"
+        echo "  --- response headers ---"
+        sed 's/^/    /' "$HDR_FILE" 2>/dev/null || true
+        echo "  --- response body (raw) ---"
+        echo "$RESP" | sed 's/^/    /'
+        echo "  --- response body (pretty) ---"
+        echo "$RESP" | jq . 2>/dev/null | sed 's/^/    /' || echo "    (body is not valid JSON)"
+        echo "  ----------------------------------------------"
+
+        rm -f "$BODY_FILE" "$HDR_FILE"
+
+        case "$HTTP_CODE" in
+          200) DISCOVERED=$(echo "$RESP" | jq -r '.camDeployedRegion // empty' 2>/dev/null | tr -d '\r') ;;
+          401|403) echo "  [WARN] Auth rejected ($HTTP_CODE): check V1_API_KEY value/scope and that V1_API_BASE_URL matches your tenant region." ;;
+          404) echo "  [WARN] Not found (404): subscription not imported into Vision One CAM, or wrong API host region." ;;
+          000) echo "  [WARN] No connectivity (000): DNS/proxy/network issue reaching ${API_BASE}." ;;
+          *)   echo "  [WARN] Unexpected status $HTTP_CODE from Vision One CAM API." ;;
+        esac
 
         if [[ -n "$DISCOVERED" && "$DISCOVERED" != "null" ]]; then
           MAIN_REGION="$DISCOVERED"
           echo "  Discovered camDeployedRegion from Vision One: $MAIN_REGION"
-        elif [[ -n "$SUB_MAIN_REGION" ]]; then
-          MAIN_REGION="$SUB_MAIN_REGION"
-          echo "  Vision One returned no region → using subs.json main_region: $MAIN_REGION"
         else
           MAIN_REGION="$DEFAULT_REGION"
-          echo "  No region from Vision One or subs.json → using DEFAULT_MAIN_REGION: $MAIN_REGION"
+          echo "  No region from Vision One → using DEFAULT_MAIN_REGION: $MAIN_REGION"
         fi
 
         # Make MAIN_REGION available to all subsequent steps in this job
@@ -144,7 +172,6 @@ stages:
       displayName: "Discover main region from Vision One CAM"
       env:
         SUB_ID: $(SUB_ID)
-        SUB_MAIN_REGION: $(SUB_MAIN_REGION)
         V1_API_KEY: $(V1_API_KEY)
 
     # ── Step 2: Terraform ─────────────────────────────────────────────────────
