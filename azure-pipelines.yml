@@ -470,10 +470,12 @@ stages:
             fi
           }
 
-          # List all Key Vaults in the subscription
-          VAULTS=$(az keyvault list --query "[].name" -o tsv 2>/dev/null | tr -d '\r')
+          # List only Key Vaults tagged as TrendMicroProduct or trend-micro-product
+          VAULTS=$(az keyvault list \
+            --query "[?tags.TrendMicroProduct != null || tags.\"trend-micro-product\" != null].name" \
+            -o tsv 2>/dev/null | tr -d '\r')
           if [[ -z "$VAULTS" ]]; then
-            echo "No Key Vaults found in subscription $SUB_ID — nothing to configure."
+            echo "No Key Vaults tagged TrendMicroProduct/trend-micro-product in $SUB_ID — nothing to configure."
             exit 0
           fi
 
