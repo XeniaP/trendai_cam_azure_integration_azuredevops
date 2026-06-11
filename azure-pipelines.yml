@@ -428,6 +428,73 @@ stages:
         SUB_ID: $(SUB_ID)
         MAIN_REGION: $(MAIN_REGION)
 
+    # ── Step 3b: Configure Key Vault access policies ──────────────────────────
+    #   Before deploy.sh runs, review every Key Vault in the subscription.
+    #   For vaults using the ACCESS-POLICY permission model (NOT RBAC), grant
+    #   the deploying service principal the key/secret permissions CAM needs.
+    #   RBAC-mode vaults are skipped (set-policy does not apply to them).
+    - task: AzureCLI@2
+      displayName: "Configure Key Vault access policies (pre-deploy)"
+      inputs:
+        azureSubscription: $(AZURE_SERVICE_CONNECTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -euo pipefail
+
+          SUB_ID="$(SUB_ID)"
+          az account set --subscription "$SUB_ID"
+
+          # Resolve the deploying service principal's object id (preferred).
+          # Falls back to --spn (app id) if directory read is unavailable.
+          OBJECT_ID=$(az ad sp show --id "$servicePrincipalId" --query id -o tsv 2>/dev/null | tr -d '\r' || true)
+          if [[ -n "$OBJECT_ID" ]]; then
+            echo "Deploying SP object id: $OBJECT_ID"
+          else
+            echo "Could not resolve object id via Graph — will use --spn $servicePrincipalId"
+          fi
+
+          set_kv_policy() {
+            local vault="$1"
+            if [[ -n "$OBJECT_ID" ]]; then
+              az keyvault set-policy --name "$vault" --object-id "$OBJECT_ID" \
+                --key-permissions create get list delete purge \
+                --secret-permissions set get list delete purge recover \
+                --only-show-errors >/dev/null
+            else
+              az keyvault set-policy --name "$vault" --spn "$servicePrincipalId" \
+                --key-permissions create get list delete purge \
+                --secret-permissions set get list delete purge recover \
+                --only-show-errors >/dev/null
+            fi
+          }
+
+          # List all Key Vaults in the subscription
+          VAULTS=$(az keyvault list --query "[].name" -o tsv 2>/dev/null | tr -d '\r')
+          if [[ -z "$VAULTS" ]]; then
+            echo "No Key Vaults found in subscription $SUB_ID — nothing to configure."
+            exit 0
+          fi
+
+          for V in $VAULTS; do
+            RBAC=$(az keyvault show --name "$V" \
+              --query "properties.enableRbacAuthorization" -o tsv 2>/dev/null | tr -d '\r' || echo "")
+            if [[ "$RBAC" == "true" || "$RBAC" == "True" ]]; then
+              echo "  [SKIP] $V → RBAC authorization model (access policies not used)"
+              continue
+            fi
+            echo "  [SET]  $V → access-policy model: granting key/secret permissions"
+            if set_kv_policy "$V"; then
+              echo "         ✓ access policy configured on $V"
+            else
+              echo "         ✗ failed to set access policy on $V (check SP rights on the vault)" >&2
+            fi
+          done
+          echo "Key Vault access policy configuration complete."
+      env:
+        SUB_ID: $(SUB_ID)
+
     # ── Step 4: Download package, configure and deploy ────────────────────────
     - task: AzureCLI@2
       displayName: "Deploy CAM integration via Terraform"
