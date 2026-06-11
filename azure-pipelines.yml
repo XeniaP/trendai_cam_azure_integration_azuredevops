@@ -2,11 +2,17 @@ trigger:
 - main
 
 variables:
-  AZURE_SERVICE_CONNECTION: 'NAME_OF_YOUR_SERVICE_CONNECTION'
+  AZURE_SERVICE_CONNECTION: 'sa-allsubscriptionstakepolicy'
   SELF_HOSTED_POOL_NAME: 'NAME_OF_YOUR_SELF_HOSTED_POOL' # Optional
   MAX_PARALLEL: 3
   TF_VERSION: '1.14.1'
-  MAIN_REGION: 'eastus'
+  TF_PARALLELISM: 30
+  TERRATAG_VERSION: 'latest'  # Pin to e.g. '0.5.6' or keep 'latest' to auto-resolve
+  TERRATAG_TAGS: '{}'         # Extra tags merged with dynamic ones, e.g. {"environment":"prod","team":"security"}
+  DEFAULT_MAIN_REGION: 'eastus'
+  V1_API_BASE_URL: 'https://api.xdr.trendmicro.com'  # Vision One regional API host
+  # DEFAULT_BACKEND_URL: ''  # Fallback if subscription has no cam_backend_url tag
+  ACTION: 'deploy'           # Set to 'destroy' at queue time to uninstall CAM
 
 stages:
 - stage: deploy
@@ -18,8 +24,8 @@ stages:
       clean: all
     displayName: Build matrix from Azure subscriptions
     pool:
-      name: $(SELF_HOSTED_POOL_NAME)
-      #vmImage: ubuntu-latest
+      #name: $(SELF_HOSTED_POOL_NAME)
+      vmImage: ubuntu-latest
     steps:
     - checkout: self
     - bash: |
@@ -39,7 +45,8 @@ stages:
           matrix[key] = {
               "SUB_NAME": s["name"],
               "SUB_ID": s["id"],
-              "STORAGE_ACCOUNT": s["storage_account"]
+              "STORAGE_ACCOUNT": s["storage_account"],
+              "SUB_MAIN_REGION": s.get("main_region", "")
           }
         print("##vso[task.setvariable variable=MATRIX;isOutput=true]" + json.dumps(matrix))
         PY
@@ -50,8 +57,12 @@ stages:
       artifact: subs_json
       displayName: "Publish subs.json (debug)"
 
+  # ─────────────────────────────────────────────────────────────────────────────
+  # JOB 2: Deploy CAM to each subscription in parallel (up to MAX_PARALLEL).
+  #         Each leg runs the full install → quota check → deploy sequence.
+  # ─────────────────────────────────────────────────────────────────────────────
   - job: run_per_subscription
-    displayName: Run per subscription (parallel)
+    displayName: "2 · Deploy per subscription"
     dependsOn: build_matrix
     pool:
       #name: $(SELF_HOSTED_POOL_NAME)
@@ -65,234 +76,443 @@ stages:
     steps:
     - checkout: self
 
+    # ── Step 1: System tools ──────────────────────────────────────────────────
     - bash: |
-        #!/usr/bin/env bash
         set -euo pipefail
         export DEBIAN_FRONTEND=noninteractive
-        sudo apt-get update -y
-        sudo apt-get install -y --no-install-recommends ca-certificates curl unzip jq python3 python3-venv python3-pip
+
+        MISSING=()
+        for bin in curl unzip jq python3; do
+          command -v "$bin" >/dev/null 2>&1 || MISSING+=("$bin")
+        done
+        if [[ ${#MISSING[@]} -gt 0 ]]; then
+          echo "== Installing missing packages: ${MISSING[*]} =="
+          sudo apt-get update -yq
+          sudo apt-get install -yq --no-install-recommends \
+            ca-certificates curl unzip jq python3 python3-venv python3-pip
+        fi
+
         if ! command -v az >/dev/null 2>&1; then
-          sudo rm -rf /var/lib/apt/lists/* && sudo apt-get update && sudo curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          echo "== Installing Azure CLI =="
+          curl -fsSL https://aka.ms/InstallAzureCLIDeb | sudo bash
         fi
-        az --version | head -n 2
         az config set extension.use_dynamic_install=yes_without_prompt
-      displayName: "Install Azure CLI"
-    
+        echo "== az $(az version --query '"azure-cli"' -o tsv) | $(python3 --version) =="
+      displayName: "Bootstrap: system dependencies"
+
+    # ── Step 1b: Discover main region from Vision One CAM ─────────────────────
+    #   Queries the Vision One Cloud Account Management API for this Azure
+    #   subscription and reads camDeployedRegion (the region V1 recorded at
+    #   import time). Falls back to subs.json main_region, then to
+    #   DEFAULT_MAIN_REGION. Sets the MAIN_REGION job variable consumed by the
+    #   CheckQuota and Deploy steps below.
     - bash: |
-        #!/usr/bin/env bash
         set -euo pipefail
-        rm -rf .terraform*
-        if command -v terraform >/dev/null 2>&1; then
-          CUR="$(terraform version | head -n1 | awk '{print $2}' | tr -d 'v')"
+
+        SUB_ID="$(SUB_ID)"
+        SUB_MAIN_REGION="$(SUB_MAIN_REGION)"
+        DEFAULT_REGION="$(DEFAULT_MAIN_REGION)"
+        API_BASE="$(V1_API_BASE_URL)"
+
+        DISCOVERED=""
+        echo "== Querying Vision One CAM for subscription $SUB_ID =="
+        RESP=$(curl -fsS \
+          -H "Authorization: Bearer ${V1_API_KEY}" \
+          -H "Accept: application/json" \
+          "${API_BASE}/beta/cam/azureSubscriptions/${SUB_ID}" 2>/dev/null || echo "")
+
+        if [[ -n "$RESP" ]]; then
+          DISCOVERED=$(echo "$RESP" | jq -r '.camDeployedRegion // empty' 2>/dev/null | tr -d '\r')
         else
-          CUR=""
+          echo "  [WARN] No response from Vision One CAM API (subscription not imported, "
+          echo "         wrong region host, or invalid key). Falling back."
         fi
-        if [[ "$CUR" != "$TF_VERSION" ]]; then
-          echo "== Install Terraform ${TF_VERSION} =="
+
+        if [[ -n "$DISCOVERED" && "$DISCOVERED" != "null" ]]; then
+          MAIN_REGION="$DISCOVERED"
+          echo "  Discovered camDeployedRegion from Vision One: $MAIN_REGION"
+        elif [[ -n "$SUB_MAIN_REGION" ]]; then
+          MAIN_REGION="$SUB_MAIN_REGION"
+          echo "  Vision One returned no region → using subs.json main_region: $MAIN_REGION"
+        else
+          MAIN_REGION="$DEFAULT_REGION"
+          echo "  No region from Vision One or subs.json → using DEFAULT_MAIN_REGION: $MAIN_REGION"
+        fi
+
+        # Make MAIN_REGION available to all subsequent steps in this job
+        echo "##vso[task.setvariable variable=MAIN_REGION]$MAIN_REGION"
+      displayName: "Discover main region from Vision One CAM"
+      env:
+        SUB_ID: $(SUB_ID)
+        SUB_MAIN_REGION: $(SUB_MAIN_REGION)
+        V1_API_KEY: $(V1_API_KEY)
+
+    # ── Step 2: Terraform ─────────────────────────────────────────────────────
+    - bash: |
+        set -euo pipefail
+        CUR=""
+        if command -v terraform >/dev/null 2>&1; then
+          CUR="$(terraform version 2>/dev/null | head -n1 | awk '{print $2}' | tr -d 'v')"
+        fi
+        if [[ "$CUR" == "$TF_VERSION" ]]; then
+          echo "== Terraform $TF_VERSION already present =="
+        else
+          echo "== Installing Terraform $TF_VERSION =="
           TF_DIR="$(Agent.TempDirectory)/terraform"
           mkdir -p "$TF_DIR"
           curl -fsSLo /tmp/terraform.zip \
             "https://releases.hashicorp.com/terraform/${TF_VERSION}/terraform_${TF_VERSION}_linux_amd64.zip"
-          unzip -o /tmp/terraform.zip -d "$TF_DIR"
+          unzip -oq /tmp/terraform.zip -d "$TF_DIR"
+          rm -f /tmp/terraform.zip
           chmod +x "$TF_DIR/terraform"
-          sudo ln -sf "$TF_DIR/terraform" /usr/local/bin/terraform && export PATH="$TF_DIR:$PATH"
+          sudo ln -sf "$TF_DIR/terraform" /usr/local/bin/terraform
           echo "##vso[task.prependpath]$TF_DIR"
-        else
-          echo "Terraform already at $TF_VERSION"
         fi
-      displayName: "Install Terraform and dependencies"
-    
+        terraform version
+      displayName: "Bootstrap: Terraform ${{ variables.TF_VERSION }} + Terratag"
+
+    # ── Step 3: Clean previous integration + quota / region detection ─────────
     - task: AzureCLI@2
-      displayName: "Check Quota and permissions"
       name: CheckQuota
+      displayName: "Clean previous install + check quota and feature regions"
       inputs:
         azureSubscription: $(AZURE_SERVICE_CONNECTION)
-        scriptType: 'bash'
+        scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
         inlineScript: |
           set -euo pipefail
-          #!/bin/bash
 
-          SUB_ID=$(SUB_ID)
-          MAIN_REGION=$(MAIN_REGION)
-          AVTD_REGIONS=[]
-          DSPM_REGIONS=[]
+          SUB_ID="$(SUB_ID)"
+          MAIN_REGION="$(MAIN_REGION)"
 
+          # Install resource-graph extension only if not already present
+          az extension show --name resource-graph &>/dev/null \
+            || az extension add --name resource-graph --only-show-errors
+
+          # ── Quota helper functions ──────────────────────────────────────────
+
+          # Y1 (consumption plan) quota — tries two API versions for compatibility
           get_y1_limit() {
             local sub="$1" reg="$2"
-            local versions=("2024-11-01" "2018-02-01")
-            for v in "${versions[@]}"; do
-              local out
-              out=$(az rest --method get --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=$v" --query "value[?contains(name.value,'dynamic') && contains(name.value,'Linux')].limit | [0]" -o tsv 2>/dev/null | tr -d '\r' || echo "")
-              [[ "$out" =~ ^[0-9]+$ ]] && { echo "$out"; return 0; }
+            local out=""
+            for v in "2024-11-01" "2018-02-01"; do
+              out=$(az rest --method get \
+                --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=$v" \
+                --query "value[?contains(name.value,'Y1') || contains(name.value,'dynamic') || contains(name.value,'Dynamic')].limit | [0]" \
+                -o tsv 2>/dev/null | tr -d '\r' || echo "")
+              if [[ "$out" =~ ^[0-9]+$ ]] && [[ "$out" -gt 0 ]]; then
+                echo "  [DEBUG] Y1 limit found via api-version=$v: $out" >&2
+                echo "$out"; return 0
+              fi
             done
+            # Last resort: dump all web usages to help diagnose
+            echo "  [DEBUG] Y1 not found — all Microsoft.Web usages in $reg:" >&2
+            az rest --method get \
+              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" \
+              --query "value[].{name:name.value,limit:limit,current:currentValue}" \
+              -o table 2>/dev/null >&2 || true
             echo "0"
           }
 
+          # standardBSv2Family cores quota — used for DSPM eligibility
           get_basv2_cores_limit() {
             local sub="$1" reg="$2"
-            local api="2023-07-01"
-            local out
+            local out=""
+            # Try exact match first
             out=$(az rest --method get \
-              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=$api" \
+              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=2023-07-01" \
               --query "value[?name.value=='standardBSv2Family'].limit | [0]" \
-              -o tsv 2>/dev/null | tr -d '\r' || true)
-            [[ "$out" =~ ^[0-9]+$ ]] && echo "$out" || echo "0"
+              -o tsv 2>/dev/null | tr -d '\r' || echo "")
+            if [[ "$out" =~ ^[0-9]+$ ]] && [[ "$out" -gt 0 ]]; then
+              echo "  [DEBUG] BSv2 limit (exact match): $out" >&2
+              echo "$out"; return 0
+            fi
+            # Fallback: partial match
+            out=$(az rest --method get \
+              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=2023-07-01" \
+              --query "value[?contains(name.value,'BSv2') || contains(name.value,'Bsv2')].limit | [0]" \
+              -o tsv 2>/dev/null | tr -d '\r' || echo "")
+            if [[ "$out" =~ ^[0-9]+$ ]] && [[ "$out" -gt 0 ]]; then
+              echo "  [DEBUG] BSv2 limit (partial match): $out" >&2
+              echo "$out"; return 0
+            fi
+            # Last resort: dump all Compute usages to help diagnose
+            echo "  [DEBUG] BSv2 not found — all Compute usages containing 'standard' in $reg:" >&2
+            az rest --method get \
+              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Compute/locations/$reg/usages?api-version=2023-07-01" \
+              --query "value[?contains(name.value,'standard') || contains(name.value,'Standard')].{name:name.value,limit:limit}" \
+              -o table 2>/dev/null >&2 || true
+            echo "0"
           }
 
+          # EP1 (premium plan) slot availability — used for File Storage Security
           get_ep1_status() {
-            HAS_QUOTA=$(az rest --method get   --url "https://management.azure.com/subscriptions/$1/providers/Microsoft.Web/locations/$2/usages?api-version=2025-05-01" --query "value[?name.value=='EP1'] | [0] | currentValue < limit" -o tsv 2>/dev/null || echo "false")
-            echo "$HAS_QUOTA"
+            local sub="$1" reg="$2"
+            local out=""
+            # Try multiple api versions — 2025-05-01 may not be available in all regions
+            for v in "2024-11-01" "2023-12-01" "2022-03-01"; do
+              out=$(az rest --method get \
+                --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=$v" \
+                --query "value[?name.value=='EP1' || contains(name.value,'ElasticPremium') || contains(name.value,'Premium')].{cur:currentValue,lim:limit}" \
+                -o json 2>/dev/null || echo "[]")
+              if [[ "$out" != "[]" ]] && [[ -n "$out" ]]; then
+                local result
+                result=$(echo "$out" | jq -e '.[0] | .cur < .lim' 2>/dev/null || echo "false")
+                echo "  [DEBUG] EP1 status via api-version=$v: cur<lim=$result raw=$out" >&2
+                echo "$result"; return 0
+              fi
+            done
+            # Last resort: dump all web usages
+            echo "  [DEBUG] EP1 not found — all Microsoft.Web usages in $reg:" >&2
+            az rest --method get \
+              --url "https://management.azure.com/subscriptions/$sub/providers/Microsoft.Web/locations/$reg/usages?api-version=2024-11-01" \
+              --query "value[].{name:name.value,limit:limit,current:currentValue}" \
+              -o table 2>/dev/null >&2 || true
+            echo "false"
           }
 
-          echo "Checkin EP1 quota in Main Region for FileSecurity: $MAIN_REGION..."
-          EP1_AVAILABLE=$(get_ep1_status "$SUB_ID" "$MAIN_REGION")
-          if [ "$EP1_AVAILABLE" == "true" ]; then
-              echo "EP1 quota is available in the main region. Enabling File Security deployment."
-              FS_ENABLE=true
-          else
-              echo "EP1 quota is not available in the main region. Disabling File Security deployment."
-              FS_ENABLE=false
-          fi
-          echo "Searching regions with VM or ACR resources for subscription $SUB_ID..."
-          RESOURCE_REGIONS=$(az graph query -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines', 'microsoft.containerregistry/registries') | project location | distinct location" --query "data[].location" -o tsv | tr -d '\r' | tr '[:upper:]' '[:lower:]')
-          echo "Regions with VM or ACR: $RESOURCE_REGIONS"
-          DEPLOYABLE_REGIONS=()
-          for REGION in $RESOURCE_REGIONS; do
-            echo "Checkin Y1 quota in region $REGION..."
-            LIMIT=$(get_y1_limit "$SUB_ID" "$REGION")
-            if [ "$LIMIT" -gt 0 ]; then
-              echo "The region $REGION has quota available."
-              DEPLOYABLE_REGIONS+=("$REGION")
-            else
-              echo "The region $REGION does not have quota available."
+          # ── File Storage Security: detect best deployment region ─────────────
+          # Allowed regions for FSS deployment (EP1 quota available in these only)
+          ALLOWED_FSS='["japaneast","uaenorth","eastus","eastus2","southcentralus","westus"]'
+          FSS_DEFAULT="eastus"
+
+          echo "Detecting best region for File Storage Security..."
+          # List non-TrendMicro storage accounts, count by region, sort descending
+          FSS_REGIONS_BY_COUNT=$(az resource list \
+            --subscription "$SUB_ID" \
+            --resource-type "Microsoft.Storage/storageAccounts" \
+            --query "[?tags.TrendMicroProduct == null].location" \
+            -o tsv 2>/dev/null \
+            | tr -d '\r' | tr '[:upper:]' '[:lower:]' \
+            | sort | uniq -c | sort -rn | awk '{print $2}' || echo "")
+          echo "  Customer storage regions (by count): $(echo "$FSS_REGIONS_BY_COUNT" | tr '\n' ' ')"
+
+          # Pick the first region in the sorted list that's in the allowed FSS list
+          FSS_REGION=""
+          for reg in $FSS_REGIONS_BY_COUNT; do
+            if echo "$ALLOWED_FSS" | jq -e --arg r "$reg" 'index($r) != null' >/dev/null 2>&1; then
+              FSS_REGION="$reg"
+              break
             fi
           done
-          ALLOWED_AVTD='["southafricanorth","australiaeast","australiasoutheast","centralindia","eastasia","japaneast","japanwest","koreacentral","southindia","southeastasia","westindia","canadacentral","canadaeast","francecentral","germanywestcentral","northeurope","norwayeast","swedencentral","switzerlandnorth","uksouth","ukwest","westeurope","uaenorth","brazilsouth","centralus","eastus","eastus2","northcentralus","southcentralus","westus","westus2","westus3"]'
-          if [ ${#DEPLOYABLE_REGIONS[@]} -eq 0 ]; then
-              FINAL_REGIONS_AVTD="[]"
+
+          if [[ -z "$FSS_REGION" ]]; then
+            echo "  No customer storage in allowed FSS regions → defaulting to $FSS_DEFAULT"
+            FSS_REGION="$FSS_DEFAULT"
           else
-              FINAL_REGIONS_AVTD=$(printf '%s\n' "${DEPLOYABLE_REGIONS[@]}" | jq -R . | jq -s -c \
-                  --argjson allowed "$ALLOWED_AVTD" \
-                  '[.[] | select(. as $curr | $allowed | index($curr))]')
+            echo "  Selected FSS region: $FSS_REGION (most customer storage accounts)"
           fi
-          echo "Searching regions with VM or StorageAccount resources for subscription $SUB_ID..."
+
+          # ── File Storage Security: EP1 quota check in chosen region ──────────
+          echo "Checking EP1 quota in $FSS_REGION for File Storage Security..."
+          EP1_AVAILABLE=$(get_ep1_status "$SUB_ID" "$FSS_REGION")
+          if [[ "$EP1_AVAILABLE" == "true" ]]; then
+            echo "  EP1 quota available → File Storage Security ENABLED in $FSS_REGION"
+            FS_ENABLE=True
+          else
+            # Exception: if TrendMicro FSS storage accounts already exist, those EP1
+            # slots are ours and will be reused on redeploy — treat quota as available.
+            TREND_STORAGES=$(az resource list \
+              --subscription "$SUB_ID" \
+              --resource-type "Microsoft.Storage/storageAccounts" \
+              --query "[?tags.TrendMicroProduct != null].name" \
+              -o tsv 2>/dev/null | tr -d '\r' || echo "")
+            if [[ -n "$TREND_STORAGES" ]]; then
+              echo "  EP1 quota shows full — TrendMicro storage accounts found: $TREND_STORAGES"
+              echo "  Those EP1 slots belong to a previous FSS deployment and will be reused."
+              echo "  File Storage Security ENABLED (TrendMicro exception)"
+              FS_ENABLE=True
+            else
+              echo "  EP1 quota unavailable → File Storage Security DISABLED"
+              FS_ENABLE=False
+            fi
+          fi
+
+          # ── AVTD regions (VM / ACR + Y1 quota check) ──────────────────────
+          ALLOWED_AVTD='["southafricanorth","australiaeast","australiasoutheast","centralindia","eastasia","japaneast","japanwest","koreacentral","southindia","southeastasia","westindia","canadacentral","canadaeast","francecentral","germanywestcentral","northeurope","norwayeast","swedencentral","switzerlandnorth","uksouth","ukwest","westeurope","uaenorth","brazilsouth","centralus","eastus","eastus2","northcentralus","southcentralus","westus","westus2","westus3"]'
+
+          echo "Searching regions with VM or ACR resources..."
+          RESOURCE_REGIONS=$(az graph query \
+            -q "resources | where subscriptionId == '$SUB_ID' | where type in~ ('microsoft.compute/virtualmachines','microsoft.containerregistry/registries') | project location | distinct location" \
+            --query "data[].location" -o tsv 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]')
+          echo "  Candidate regions: $RESOURCE_REGIONS"
+
+          DEPLOYABLE_AVTD=()
+          for REGION in $RESOURCE_REGIONS; do
+            LIMIT=$(get_y1_limit "$SUB_ID" "$REGION")
+            if [[ "$LIMIT" -gt 0 ]]; then
+              echo "  $REGION → Y1 quota OK ($LIMIT)"
+              DEPLOYABLE_AVTD+=("$REGION")
+            else
+              echo "  $REGION → Y1 quota insufficient, skipping"
+            fi
+          done
+
+          if [[ ${#DEPLOYABLE_AVTD[@]} -eq 0 ]]; then
+            FINAL_REGIONS_AVTD="[]"
+          else
+            FINAL_REGIONS_AVTD=$(printf '%s\n' "${DEPLOYABLE_AVTD[@]}" | jq -R . | jq -s -c \
+              --argjson allowed "$ALLOWED_AVTD" \
+              '[.[] | select(. as $r | $allowed | index($r) != null)]')
+          fi
+          echo "AVTD deployable regions: $FINAL_REGIONS_AVTD"
+
+          # ── DSPM regions (VM / Storage + BSv2 quota check) ────────────────
+          ALLOWED_DSPM='["australiaeast","centralindia","japaneast","southeastasia","germanywestcentral","uksouth","uaenorth","brazilsouth","eastus"]'
+
+          echo "Searching regions with VM or Storage Account resources..."
           REGIONS_DSPM=$(az graph query -q "
             resources
             | where subscriptionId == '$SUB_ID'
             | where type =~ 'microsoft.compute/virtualmachines' or type =~ 'microsoft.storage/storageaccounts'
-            | summarize 
-                hasVM = countif(type =~ 'microsoft.compute/virtualmachines'), 
-                hasStorage = countif(type =~ 'microsoft.storage/storageaccounts') 
-              by location
+            | summarize hasVM = countif(type =~ 'microsoft.compute/virtualmachines'),
+                        hasStorage = countif(type =~ 'microsoft.storage/storageaccounts') by location
             | where hasVM > 0 or hasStorage > 0
             | project location
           " --query "data[].location" -o tsv 2>/dev/null | tr -d '\r' | tr '[:upper:]' '[:lower:]' | sort -u)
-          DEPLOYABLE_REGIONS_DSPM=()
-          echo "Regions with VM or StorageAccount: $REGIONS_DSPM"
+          echo "  Candidate regions: $REGIONS_DSPM"
+
+          DEPLOYABLE_DSPM=()
           for REGION in $REGIONS_DSPM; do
-            echo "Checkin Y1 quota in region $REGION..."
             LIMIT=$(get_basv2_cores_limit "$SUB_ID" "$REGION")
-            if [ "$LIMIT" -gt 0 ]; then
-              echo "The region $REGION has quota available."
-              DEPLOYABLE_REGIONS_DSPM+=("$REGION")
+            if [[ "$LIMIT" -gt 0 ]]; then
+              echo "  $REGION → BSv2 quota OK ($LIMIT)"
+              DEPLOYABLE_DSPM+=("$REGION")
             else
-              echo "The region $REGION does not have quota available."
+              echo "  $REGION → BSv2 quota insufficient, skipping"
             fi
           done
-          ALLOWED_REGIONS_DSPM='["australiaeast","centralindia","japaneast","southeastasia","germanywestcentral","uksouth","uaenorth","brazilsouth","eastus"]'
-          if [ ${#DEPLOYABLE_REGIONS_DSPM[@]} -eq 0 ]; then
-              FINAL_REGIONS_DSPM="[]"
+
+          if [[ ${#DEPLOYABLE_DSPM[@]} -eq 0 ]]; then
+            FINAL_REGIONS_DSPM="[]"
           else
-              FINAL_REGIONS_DSPM=$(printf '%s\n' "${DEPLOYABLE_REGIONS_DSPM[@]}" | jq -R . | jq -s -c \
-                  --argjson allowed "$ALLOWED_REGIONS_DSPM" \
-                  '[.[] | select(. as $curr | $allowed | index($curr))]')
+            FINAL_REGIONS_DSPM=$(printf '%s\n' "${DEPLOYABLE_DSPM[@]}" | jq -R . | jq -s -c \
+              --argjson allowed "$ALLOWED_DSPM" \
+              '[.[] | select(. as $r | $allowed | index($r) != null)]')
           fi
-
-          to_json_array() {
-            if [ "$#" -eq 0 ]; then
-              echo "[]"
-            else
-              printf '%s\n' "$@" | jq -R . | jq -s -c .
-            fi
-          }
-
-          AVTD_REGIONS="$FINAL_REGIONS_AVTD"
-          DSPM_REGIONS="$FINAL_REGIONS_DSPM"
-
-          echo "Final AVTD deployable regions: $AVTD_REGIONS"
-          echo "Final DSPM deployable regions: $DSPM_REGIONS"
+          echo "DSPM deployable regions: $FINAL_REGIONS_DSPM"
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
-          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$AVTD_REGIONS"
-          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$DSPM_REGIONS"
+          echo "##vso[task.setvariable variable=FSS_REGION;isOutput=true]$FSS_REGION"
+          echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$FINAL_REGIONS_AVTD"
+          echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$FINAL_REGIONS_DSPM"
       env:
         SUB_ID: $(SUB_ID)
-        REGION: $(MAIN_REGION)
+        MAIN_REGION: $(MAIN_REGION)
 
+    # ── Step 4: Download package, configure and deploy ────────────────────────
     - task: AzureCLI@2
-      displayName: "Deploy Integration"
+      displayName: "Deploy CAM integration via Terraform"
       inputs:
         azureSubscription: $(AZURE_SERVICE_CONNECTION)
-        scriptType: 'bash'
+        scriptType: bash
         scriptLocation: inlineScript
         addSpnToEnvironment: true
         inlineScript: |
           set -euo pipefail
-          echo "== Setting Features Environment =="
-          export FS_STATUS=$(CheckQuota.FS_ENABLE)
-          export AVTD_REGIONS=$(CheckQuota.DEPLOY_AVTD_REGIONS)
-          export DSPM_REGIONS=$(CheckQuota.DEPLOY_DSPM_REGIONS)
-          export SUB_ID=$(SUB_ID)
 
-          sudo apt install python3 python-is-python3 -y
-          python3 -m venv myenv
+          # Normalize an ADO pipeline variable to a clean JSON array.
+          # CheckQuota emits proper JSON ([], ["eastus"]) so we pass it through
+          # directly; the fallback handles legacy unquoted format [eastus,westus].
+          to_json_array() {
+            local input="${1:-}"
+            [[ -z "$input" || "$input" == "[]" ]] && { echo "[]"; return; }
+            if echo "$input" | jq -e 'if type == "array" then . else error end' >/dev/null 2>&1; then
+              echo "$input" | jq -c .
+            else
+              echo "$input" | tr -d '[]' | tr ',' '\n' \
+                | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+                | grep -v '^$' | jq -R . | jq -s -c .
+            fi
+          }
+
+          export FS_ENABLE=$(CheckQuota.FS_ENABLE)
+          export AVTD_REGIONS=$(to_json_array "$(CheckQuota.DEPLOY_AVTD_REGIONS)")
+          export DSPM_REGIONS=$(to_json_array "$(CheckQuota.DEPLOY_DSPM_REGIONS)")
+          export FSS_REGION=$(CheckQuota.FSS_REGION)
+          echo "FS_ENABLE=$FS_ENABLE | FS_REGION=$FSS_REGION | AVTD=$AVTD_REGIONS | DSPM=$DSPM_REGIONS"
+
+          command -v python >/dev/null 2>&1 \
+            || sudo apt-get install -yq --no-install-recommends python-is-python3
+          if [[ ! -f myenv/bin/activate ]] || ! myenv/bin/python -c "import requests" 2>/dev/null; then
+            python3 -m venv myenv
+            myenv/bin/pip install --quiet requests
+          fi
           source myenv/bin/activate
-          pip install requests
-          echo "== Setting TrendAI Environment =="
+
           export PKG_ZIP="cloud-account-management-terraform-package.zip"
           export PKG_DIR="cloud-account-management-terraform-package"
-          rm -rf "$PKG_DIR"
-          mkdir -p "$PKG_DIR"
-          curl https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/Modules/Azure/Integration_in_pipeline/requestTemplateforTrendAI.py | python
-          echo "== Setting authentication parameters =="
+          rm -rf "$PKG_DIR" && mkdir -p "$PKG_DIR"
+
+          echo "== Downloading CAM package =="
+          curl -fsSL https://raw.githubusercontent.com/XeniaP/trendai-cloudsecurity-poc-utilities/refs/heads/Modules/Azure/Integration_in_pipeline/requestTemplateforTrendAI.py | python
+
+          chmod +x "$PKG_DIR"/*.sh 2>/dev/null || true
+          chmod +x "$PKG_DIR"/cam/*.sh 2>/dev/null || true
+          sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh"
+
+          sed -i '/variable "is_user_account"/,/}/{s/default *= *true/default = false/}' \
+            "$PKG_DIR/cam/variables.tf"
+
+          echo "== Configuring File Storage Security =="
+          if [[ "$FS_ENABLE" == "true" ]]; then
+            STORAGE_NAME="{\"global\": \"${STORAGE_ACCOUNT}\"}"
+            SED_VALUE=$(printf '%s' "$STORAGE_NAME" | sed 's/"/\\\\"/g')
+            sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${SED_VALUE}\"|g" "$PKG_DIR/main.tf"
+          fi
+
+          echo "== Setting subscription context and auth =="
           az account set --subscription "$SUB_ID"
           export ARM_SUBSCRIPTION_ID="$SUB_ID"
           export ARM_TENANT_ID="$tenantId"
           export ARM_CLIENT_ID="$servicePrincipalId"
           if [[ -n "${servicePrincipalKey:-}" ]]; then
-            echo "== Using SPN secret auth =="
             export ARM_CLIENT_SECRET="$servicePrincipalKey"
             unset ARM_USE_OIDC ARM_OIDC_TOKEN || true
           elif [[ -n "${idToken:-}" ]]; then
-            echo "== Using OIDC auth (federated service connection) =="
             export ARM_USE_OIDC=true
             export ARM_OIDC_TOKEN="$idToken"
             unset ARM_CLIENT_SECRET || true
           else
-            echo "ERROR: No servicePrincipalKey and no idToken. Check your Service Connection type." >&2
+            echo "ERROR: No auth credentials found (no servicePrincipalKey, no idToken)." >&2
             exit 1
           fi
-          echo "== Configure File Security Quarantine Storage =="
-          STORAGE_NAME="{\"global\": \"${STORAGE_ACCOUNT}\"}"
-          SED_VALUE=$(printf '%s' "$STORAGE_NAME" | sed 's/"/\\\\"/g')
-          sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${SED_VALUE}\"|g" "$PKG_DIR/main.tf"
-          echo "== Patching cam/variables.tf: is_user_account default true -> false =="
-          sed -i '/variable "is_user_account"/,/}/{s/default *= *true/default = false/}' \
-            "$PKG_DIR/cam/variables.tf"
-          grep -A5 'is_user_account' "$PKG_DIR/cam/variables.tf"
-          sed -i "s|^export TF_AUTO_APPROVE=.*|export TF_AUTO_APPROVE=true|g" "$PKG_DIR/deploy.sh" || true
-          echo "== Deploying with Terraform =="
+
           cd "$PKG_DIR"
-          sudo chmod +x deploy.sh
           export TF_LOG=ERROR
-          ./deploy.sh
+
+          export TF_PLUGIN_CACHE_DIR="/opt/tf-plugin-cache"
+          sudo mkdir -p "$TF_PLUGIN_CACHE_DIR"
+          sudo chmod 777 "$TF_PLUGIN_CACHE_DIR"
+
+          if [[ "${ACTION:-deploy}" == "destroy" ]]; then
+            echo "== ACTION=destroy: patching parallelism and running uninstall =="
+            # Inject parallelism into terraform destroy calls (-refresh=false omitted for destroy)
+            for f in ./functions.sh ./uninstall.sh; do
+              [[ -f "$f" ]] || continue
+              sed -i 's/terraform destroy\$tf_auto_approve_flag/terraform destroy$tf_auto_approve_flag -parallelism='"$TF_PARALLELISM"'/g' "$f"
+              echo "[INFO] $f patched with -parallelism=$TF_PARALLELISM"
+            done
+            chmod +x ./uninstall.sh 2>/dev/null || true
+            ./uninstall.sh
+          else
+            echo "== ACTION=deploy: patching parallelism and running deploy =="
+            # Inject parallelism into every terraform apply in functions.sh
+            sed -i 's/terraform apply\$tf_auto_approve_flag/terraform apply$tf_auto_approve_flag -parallelism='"$TF_PARALLELISM"' -refresh=false/g' \
+              ./functions.sh
+            echo "[INFO] functions.sh patched with -parallelism=$TF_PARALLELISM -refresh=false"
+            ./deploy.sh
+          fi
       env:
         SUB_ID: $(SUB_ID)
+        BACKEND_URL: $(BACKEND_URL)
         STORAGE_ACCOUNT: $(STORAGE_ACCOUNT)
         CLOUD_ACCOUNT_NAME: "$(SUB_NAME)"
+        MAIN_REGION: $(MAIN_REGION)
+        TF_PARALLELISM: $(TF_PARALLELISM)
+        TERRATAG_VERSION: $(TERRATAG_VERSION)
+        TERRATAG_TAGS: $(TERRATAG_TAGS)
         V1_API_KEY: $(V1_API_KEY)
-        SWP_INSTANCE: $(SWP_INSTANCE)
-        TF_VAR_is_user_account: false
-
+        SWP_INSTANCE_ID: $(SWP_INSTANCE)
+        ACTION: $(ACTION)
