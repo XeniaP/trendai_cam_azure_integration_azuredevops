@@ -3,7 +3,6 @@ trigger:
 
 variables:
   AZURE_SERVICE_CONNECTION: 'sa-allsubscriptionstakepolicy'
-  SELF_HOSTED_POOL_NAME: 'NAME_OF_YOUR_SELF_HOSTED_POOL' # Optional
   MAX_PARALLEL: 3
   TF_VERSION: '1.14.1'
   TF_PARALLELISM: 30
@@ -11,7 +10,6 @@ variables:
   TERRATAG_TAGS: '{}'         # Extra tags merged with dynamic ones, e.g. {"environment":"prod","team":"security"}
   DEFAULT_MAIN_REGION: 'eastus'
   V1_API_BASE_URL: 'https://api.xdr.trendmicro.com'  # Vision One regional API host
-  # DEFAULT_BACKEND_URL: ''  # Fallback if subscription has no cam_backend_url tag
   ACTION: 'deploy'           # Set to 'destroy' at queue time to uninstall CAM
 
 stages:
@@ -24,7 +22,6 @@ stages:
       clean: all
     displayName: Build matrix from Azure subscriptions
     pool:
-      #name: $(SELF_HOSTED_POOL_NAME)
       vmImage: ubuntu-latest
     steps:
     - checkout: self
@@ -64,7 +61,6 @@ stages:
     displayName: "2 · Deploy per subscription"
     dependsOn: build_matrix
     pool:
-      #name: $(SELF_HOSTED_POOL_NAME)
       vmImage: ubuntu-latest
     workspace:
       clean: all
@@ -100,11 +96,6 @@ stages:
       displayName: "Bootstrap: system dependencies"
 
     # ── Step 1b: Discover main region from Vision One CAM ─────────────────────
-    #   Queries the Vision One Cloud Account Management API for this Azure
-    #   subscription and reads camDeployedRegion (the region V1 recorded at
-    #   import time). Falls back to DEFAULT_MAIN_REGION when V1 has no value.
-    #   Sets the MAIN_REGION job variable consumed by the CheckQuota and
-    #   Deploy steps below.
     - bash: |
         set -euo pipefail
 
@@ -301,8 +292,14 @@ stages:
 
           # ── File Storage Security: detect best deployment region ─────────────
           # Allowed regions for FSS deployment (EP1 quota available in these only)
-          ALLOWED_FSS='["japaneast","uaenorth","eastus","eastus2","southcentralus","westus"]'
-          FSS_DEFAULT="eastus"
+          ALLOWED_FSS='["brazilsouth","japaneast","uaenorth","eastus","eastus2","southcentralus","westus"]'
+          # Default FSS region = CAM main region (discovered from Vision One),
+          # but only if it's an allowed FSS region; otherwise fall back to eastus.
+          if echo "$ALLOWED_FSS" | jq -e --arg r "$MAIN_REGION" 'index($r) != null' >/dev/null 2>&1; then
+            FSS_DEFAULT="$MAIN_REGION"
+          else
+            FSS_DEFAULT="eastus"
+          fi
 
           echo "Detecting best region for File Storage Security..."
           # List non-TrendMicro storage accounts, count by region, sort descending
@@ -497,6 +494,135 @@ stages:
       env:
         SUB_ID: $(SUB_ID)
 
+    # ── Step 3c: Stop DSPM VMs (pre-Terraform apply) ─────────────────────────
+    #   Ensures all VMs in trendmicro-v1-dspm-* resource groups are fully
+    #   deallocated before Terraform runs. Blocks until confirmed or times out.
+    - task: AzureCLI@2
+      displayName: "Stop DSPM VMs (pre-Terraform apply)"
+      inputs:
+        azureSubscription: $(AZURE_SERVICE_CONNECTION)
+        scriptType: bash
+        scriptLocation: inlineScript
+        addSpnToEnvironment: true
+        inlineScript: |
+          set -euo pipefail
+
+          SUB_ID="$(SUB_ID)"
+          DSPM_RG_PREFIX="trendmicro-v1-dspm"
+          MAX_WAIT_SECONDS=300
+          POLL_INTERVAL=15
+
+          echo "======================================================"
+          echo " DSPM VM Shutdown — pre Terraform apply"
+          echo " Subscription: $SUB_ID"
+          echo "======================================================"
+
+          az account set --subscription "$SUB_ID"
+
+          # ── 1/3: Discover DSPM resource groups ──────────────────────────────
+          echo ""
+          echo "[1/3] Searching for DSPM resource groups..."
+          RGS=$(az group list \
+            --query "[?starts_with(name, '${DSPM_RG_PREFIX}')].name" \
+            -o tsv 2>/dev/null || echo "")
+
+          if [[ -z "$RGS" ]]; then
+            echo "  ✓ No DSPM resource groups found. Nothing to do."
+            exit 0
+          fi
+          echo "  Resource groups found:"
+          echo "$RGS" | sed 's/^/    - /'
+
+          # ── 2/3: List VMs and their power states ────────────────────────────
+          echo ""
+          echo "[2/3] Discovering VMs..."
+          VM_LIST=()
+          while IFS= read -r rg; do
+            VMS=$(az vm list \
+              --resource-group "$rg" \
+              --query "[].{name:name, rg:resourceGroup}" \
+              -o tsv 2>/dev/null || true)
+            if [[ -z "$VMS" ]]; then
+              echo "  [$rg] no VMs found"
+              continue
+            fi
+            while IFS=$'\t' read -r vm_name vm_rg; do
+              POWER=$(az vm get-instance-view \
+                --name "$vm_name" \
+                --resource-group "$vm_rg" \
+                --query "instanceView.statuses[?starts_with(code,'PowerState')].displayStatus | [0]" \
+                -o tsv 2>/dev/null || echo "Unknown")
+              echo "  [$vm_rg] $vm_name → $POWER"
+              VM_LIST+=("$vm_name|$vm_rg|$POWER")
+            done <<< "$VMS"
+          done <<< "$RGS"
+
+          if [[ ${#VM_LIST[@]} -eq 0 ]]; then
+            echo ""
+            echo "  ✓ No DSPM VMs found. Ready for terraform apply."
+            exit 0
+          fi
+
+          # ── 3/3: Deallocate (blocking, no --no-wait) ────────────────────────
+          echo ""
+          echo "[3/3] Deallocating VMs..."
+          DEALLOCATE_LIST=()
+          for entry in "${VM_LIST[@]}"; do
+            IFS='|' read -r vm_name vm_rg power_state <<< "$entry"
+            if [[ "$power_state" == "VM deallocated" ]]; then
+              echo "  [SKIP] $vm_name — already deallocated"
+              continue
+            fi
+            echo -n "  [STOP] $vm_name ($vm_rg)... "
+            if az vm deallocate \
+                --name "$vm_name" \
+                --resource-group "$vm_rg" \
+                --output none 2>/dev/null; then
+              echo "✓ deallocated"
+              DEALLOCATE_LIST+=("$vm_name|$vm_rg")
+            else
+              echo "✗ FAILED" >&2
+              exit 1
+            fi
+          done
+
+          if [[ ${#DEALLOCATE_LIST[@]} -eq 0 ]]; then
+            echo ""
+            echo "  ✓ All DSPM VMs were already deallocated. Ready for terraform apply."
+            exit 0
+          fi
+
+          # ── Verify power state polling until all are deallocated ─────────────
+          echo ""
+          echo "Verifying deallocated state (timeout: ${MAX_WAIT_SECONDS}s)..."
+          ELAPSED=0
+          while [[ $ELAPSED -lt $MAX_WAIT_SECONDS ]]; do
+            ALL_DONE=true
+            for entry in "${DEALLOCATE_LIST[@]}"; do
+              IFS='|' read -r vm_name vm_rg <<< "$entry"
+              POWER=$(az vm get-instance-view \
+                --name "$vm_name" \
+                --resource-group "$vm_rg" \
+                --query "instanceView.statuses[?starts_with(code,'PowerState')].displayStatus | [0]" \
+                -o tsv 2>/dev/null || echo "Unknown")
+              if [[ "$POWER" != "VM deallocated" ]]; then
+                echo "  [WAIT] $vm_name → $POWER (${ELAPSED}s elapsed)"
+                ALL_DONE=false
+              fi
+            done
+            $ALL_DONE && {
+              echo "  ✓ All DSPM VMs confirmed deallocated. Proceeding to terraform apply."
+              exit 0
+            }
+            sleep "$POLL_INTERVAL"
+            ELAPSED=$((ELAPSED + POLL_INTERVAL))
+          done
+
+          echo "  ✗ Timeout after ${MAX_WAIT_SECONDS}s — not all VMs reached deallocated state." >&2
+          exit 1
+      env:
+        SUB_ID: $(SUB_ID)
+
     # ── Step 4: Download package, configure and deploy ────────────────────────
     - task: AzureCLI@2
       displayName: "Deploy CAM integration via Terraform"
@@ -581,6 +707,102 @@ stages:
           export TF_PLUGIN_CACHE_DIR="/opt/tf-plugin-cache"
           sudo mkdir -p "$TF_PLUGIN_CACHE_DIR"
           sudo chmod 777 "$TF_PLUGIN_CACHE_DIR"
+
+          # ── Auto-import + retry shim for `terraform apply` ───────────────────
+          #   Transparently wraps every `terraform apply` invoked by deploy.sh /
+          #   functions.sh. On failure it:
+          #     1) auto-imports resources that report
+          #        "already exists - ... needs to be imported into the State"
+          #     2) sleeps + retries on transient errors (ServiceBus 409 /
+          #        SubCode=40300 "Try again later", throttling, etc.)
+          #   Any non-apply subcommand (init/plan/destroy) passes straight through.
+          export REAL_TERRAFORM="$(command -v terraform)"
+          export TF_RETRY_MAX_ATTEMPTS="${TF_RETRY_MAX_ATTEMPTS:-6}"
+          export TF_RETRY_SLEEP_SECONDS="${TF_RETRY_SLEEP_SECONDS:-90}"
+          SHIM_DIR="$PWD/.tfshim"
+          mkdir -p "$SHIM_DIR"
+          cat > "$SHIM_DIR/terraform" <<'TFSHIM'
+          #!/usr/bin/env bash
+          set -uo pipefail
+          REAL="${REAL_TERRAFORM:?REAL_TERRAFORM not set}"
+          MAX="${TF_RETRY_MAX_ATTEMPTS:-6}"
+          SLEEP_S="${TF_RETRY_SLEEP_SECONDS:-90}"
+
+          # Only wrap "apply"; pass every other subcommand straight through.
+          if [[ "${1:-}" != "apply" ]]; then
+            exec "$REAL" "$@"
+          fi
+
+          # Reuse the apply's var args (-var / -var-file) for any import we run.
+          import_var_args=()
+          args=("$@"); n=${#args[@]}
+          for ((i=0; i<n; i++)); do
+            a="${args[i]}"
+            case "$a" in
+              -var-file=*|-var=*) import_var_args+=("$a") ;;
+              -var-file|-var)
+                j=$((i+1))
+                if (( j < n )); then import_var_args+=("$a" "${args[j]}"); i=$j; fi ;;
+            esac
+          done
+
+          attempt=0
+          while :; do
+            attempt=$((attempt+1))
+            LOG="$(mktemp)"
+            echo "[tfshim] terraform apply — attempt ${attempt}/${MAX}"
+            "$REAL" "$@" 2>&1 | tee "$LOG"
+            status=${PIPESTATUS[0]}
+            if [[ "$status" -eq 0 ]]; then rm -f "$LOG"; exit 0; fi
+            if (( attempt >= MAX )); then
+              echo "[tfshim] reached max attempts (${MAX}); giving up." >&2
+              rm -f "$LOG"; exit "$status"
+            fi
+
+            # 1) Auto-import "already exists / needs to be imported" resources.
+            imported=0; pending_id=""
+            while IFS= read -r line; do
+              if [[ "$line" == *"A resource with the ID"*"already exists"* && "$line" == *"needs to be imported"* ]]; then
+                pending_id="${line#*A resource with the ID \"}"
+                pending_id="${pending_id%%\"*}"
+                continue
+              fi
+              if [[ -n "$pending_id" && "$line" == *"with "*","* ]]; then
+                addr="${line#*with }"; addr="${addr%,*}"
+                addr="${addr#"${addr%%[![:space:]]*}"}"   # ltrim
+                addr="${addr%"${addr##*[![:space:]]}"}"   # rtrim
+                echo "[tfshim] importing: ${addr}  <=  ${pending_id}"
+                if "$REAL" import -no-color -input=false ${import_var_args[@]+"${import_var_args[@]}"} "$addr" "$pending_id"; then
+                  imported=$((imported+1)); echo "[tfshim]   ✓ imported"
+                else
+                  echo "[tfshim]   ✗ import failed for ${addr}" >&2
+                fi
+                pending_id=""
+              fi
+            done < "$LOG"
+
+            # 2) Detect transient / retryable errors.
+            transient=0
+            if grep -qiE 'SubCode=40300|Try again later|MessagingGateway|409 Conflict|TooManyRequests|\b429\b|rate.?limit|please try again|temporar' "$LOG"; then
+              transient=1
+            fi
+            rm -f "$LOG"
+
+            if (( imported == 0 && transient == 0 )); then
+              echo "[tfshim] no auto-recoverable errors detected; giving up." >&2
+              exit "$status"
+            fi
+            if (( transient == 1 )); then
+              echo "[tfshim] transient error(s) detected — sleeping ${SLEEP_S}s before retry..."
+              sleep "$SLEEP_S"
+            else
+              echo "[tfshim] imported ${imported} resource(s) — retrying apply..."
+            fi
+          done
+          TFSHIM
+          chmod +x "$SHIM_DIR/terraform"
+          export PATH="$SHIM_DIR:$PATH"
+          echo "[INFO] terraform auto-import/retry shim active (real tf: $REAL_TERRAFORM, max=$TF_RETRY_MAX_ATTEMPTS, sleep=${TF_RETRY_SLEEP_SECONDS}s)"
 
           if [[ "${ACTION:-deploy}" == "destroy" ]]; then
             echo "== ACTION=destroy: patching parallelism and running uninstall =="
