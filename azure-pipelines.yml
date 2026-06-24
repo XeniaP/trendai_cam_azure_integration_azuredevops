@@ -12,6 +12,15 @@ variables:
   V1_API_BASE_URL: 'https://api.xdr.trendmicro.com'  # Vision One regional API host
   ACTION: 'deploy'           # Set to 'destroy' at queue time to uninstall CAM
 
+  # ── Feature toggles (override at queue time) ────────────────────────────────
+  #   Control which CAM features are deployed across the whole pipeline.
+  #   Set to 'false' at queue time to skip a feature entirely (no detection,
+  #   no quota checks, no deployment). When 'true' (default) the feature is
+  #   still subject to its per-subscription region/quota eligibility checks.
+  ENABLE_FSS: 'true'         # File Storage Security
+  ENABLE_AVTD: 'true'        # Attack-surface / Virtual Threat Detection
+  ENABLE_DSPM: 'true'        # Data Security Posture Management
+
 stages:
 - stage: deploy
   displayName: Deploy in parallel per subscription
@@ -291,6 +300,11 @@ stages:
           }
 
           # ── File Storage Security: detect best deployment region ─────────────
+          if [[ "${ENABLE_FSS,,}" != "true" ]]; then
+            echo "File Storage Security DISABLED by pipeline toggle (ENABLE_FSS=$ENABLE_FSS) — skipping detection."
+            FS_ENABLE=False
+            FSS_REGION=""
+          else
           # Allowed regions for FSS deployment (EP1 quota available in these only)
           ALLOWED_FSS='["brazilsouth","japaneast","uaenorth","eastus","eastus2","southcentralus","westus"]'
           # Default FSS region = CAM main region (discovered from Vision One),
@@ -352,8 +366,13 @@ stages:
               FS_ENABLE=False
             fi
           fi
+          fi  # end ENABLE_FSS toggle
 
           # ── AVTD regions (VM / ACR + Y1 quota check) ──────────────────────
+          if [[ "${ENABLE_AVTD,,}" != "true" ]]; then
+            echo "AVTD DISABLED by pipeline toggle (ENABLE_AVTD=$ENABLE_AVTD) — skipping detection."
+            FINAL_REGIONS_AVTD="[]"
+          else
           ALLOWED_AVTD='["southafricanorth","australiaeast","australiasoutheast","centralindia","eastasia","japaneast","japanwest","koreacentral","southindia","southeastasia","westindia","canadacentral","canadaeast","francecentral","germanywestcentral","northeurope","norwayeast","swedencentral","switzerlandnorth","uksouth","ukwest","westeurope","uaenorth","brazilsouth","centralus","eastus","eastus2","northcentralus","southcentralus","westus","westus2","westus3"]'
 
           echo "Searching regions with VM or ACR resources..."
@@ -381,8 +400,13 @@ stages:
               '[.[] | select(. as $r | $allowed | index($r) != null)]')
           fi
           echo "AVTD deployable regions: $FINAL_REGIONS_AVTD"
+          fi  # end ENABLE_AVTD toggle
 
           # ── DSPM regions (VM / Storage + BSv2 quota check) ────────────────
+          if [[ "${ENABLE_DSPM,,}" != "true" ]]; then
+            echo "DSPM DISABLED by pipeline toggle (ENABLE_DSPM=$ENABLE_DSPM) — skipping detection."
+            FINAL_REGIONS_DSPM="[]"
+          else
           ALLOWED_DSPM='["australiaeast","centralindia","japaneast","southeastasia","germanywestcentral","uksouth","uaenorth","brazilsouth","eastus"]'
 
           echo "Searching regions with VM or Storage Account resources..."
@@ -416,6 +440,7 @@ stages:
               '[.[] | select(. as $r | $allowed | index($r) != null)]')
           fi
           echo "DSPM deployable regions: $FINAL_REGIONS_DSPM"
+          fi  # end ENABLE_DSPM toggle
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
           echo "##vso[task.setvariable variable=FSS_REGION;isOutput=true]$FSS_REGION"
@@ -424,6 +449,9 @@ stages:
       env:
         SUB_ID: $(SUB_ID)
         MAIN_REGION: $(MAIN_REGION)
+        ENABLE_FSS: $(ENABLE_FSS)
+        ENABLE_AVTD: $(ENABLE_AVTD)
+        ENABLE_DSPM: $(ENABLE_DSPM)
 
     # ── Step 3b: Configure Key Vault access policies ──────────────────────────
     #   Before deploy.sh runs, review every Key Vault in the subscription.
@@ -807,13 +835,13 @@ stages:
           if [[ "${ACTION:-deploy}" == "destroy" ]]; then
             echo "== ACTION=destroy: patching parallelism and running uninstall =="
             # Inject parallelism into terraform destroy calls (-refresh=false omitted for destroy)
-            for f in ./functions.sh ./uninstall.sh; do
+            for f in ./functions.sh ./deploy.sh; do
               [[ -f "$f" ]] || continue
               sed -i 's/terraform destroy\$tf_auto_approve_flag/terraform destroy$tf_auto_approve_flag -parallelism='"$TF_PARALLELISM"'/g' "$f"
               echo "[INFO] $f patched with -parallelism=$TF_PARALLELISM"
             done
-            chmod +x ./uninstall.sh 2>/dev/null || true
-            ./uninstall.sh
+            chmod +x ./deploy.sh 2>/dev/null || true
+            ./deploy.sh uninstall 
           else
             echo "== ACTION=deploy: patching parallelism and running deploy =="
             # Inject parallelism into every terraform apply in functions.sh
