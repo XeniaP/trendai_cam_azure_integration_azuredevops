@@ -19,7 +19,7 @@ variables:
   #   still subject to its per-subscription region/quota eligibility checks.
   ENABLE_FSS: 'true'         # File Storage Security
   ENABLE_AVTD: 'true'        # Attack-surface / Virtual Threat Detection
-  ENABLE_DSPM: 'true'        # Data Security Posture Management
+  ENABLE_DSPM: 'false'        # Data Security Posture Management
 
 stages:
 - stage: deploy
