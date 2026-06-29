@@ -31,6 +31,32 @@ Optional (for contributors and maintainers):
 - `az` CLI installed and logged in: `az login`.
 - Access to the subscription list in `subscriptions/subs.json` and any secrets/configuration stored in your organization.
 
+## Subscription inventory (`subscriptions/subs.json`)
+
+Each entry describes one Azure subscription and its per-feature settings:
+
+```json
+[
+  {
+    "id": "<subscription-id>",
+    "name": "Project1",
+    "storage_account": "<quarantine-storage-account>",
+    "fss_regions": ["eastus"],
+    "default_main_region": "eastus"
+  }
+]
+```
+
+- `fss_regions` — regions configured for File Storage Security (FSS). Replaces the
+  previously hardcoded allow-list; FSS is only considered in these regions.
+- `default_main_region` — the **Default Main Region** (`MAIN_REGION`) for the
+  subscription. The FSS EP1 quota is validated **only** in this region, and FSS
+  deploys here. If omitted, the pipeline falls back to the pipeline-wide
+  `DEFAULT_MAIN_REGION` variable.
+
+> Note: `MAIN_REGION` is taken from `subs.json` (`default_main_region`). The
+> Vision One CAM region discovery is no longer used to determine the main region.
+
 ## Configuration
 
 1. Review `subscriptions/subs.json` and update it with your subscriptions and metadata following the existing JSON schema.

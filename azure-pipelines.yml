@@ -51,7 +51,13 @@ stages:
           matrix[key] = {
               "SUB_NAME": s["name"],
               "SUB_ID": s["id"],
-              "STORAGE_ACCOUNT": s["storage_account"]
+              "STORAGE_ACCOUNT": s["storage_account"],
+              # FSS regions are configured per-subscription in subs.json.
+              # FSS_REGIONS → list of regions FSS is eligible for (JSON array string)
+              # MAIN_REGION → the "Default Main Region" (from "default_main_region"):
+              #               the ONLY region where the EP1 quota is validated for FSS.
+              "FSS_REGIONS": json.dumps(s.get("fss_regions", [])),
+              "MAIN_REGION": s.get("default_main_region", "")
           }
         print("##vso[task.setvariable variable=MATRIX;isOutput=true]" + json.dumps(matrix))
         PY
@@ -104,75 +110,26 @@ stages:
         echo "== az $(az version --query '"azure-cli"' -o tsv) | $(python3 --version) =="
       displayName: "Bootstrap: system dependencies"
 
-    # ── Step 1b: Discover main region from Vision One CAM ─────────────────────
+    # ── Step 1b: Resolve main region (Default Main Region) from subs.json ─────
+    #   MAIN_REGION is the "Default Main Region" for the subscription. It comes
+    #   from subs.json ("default_main_region") via the build matrix. When that
+    #   field is empty, fall back to the pipeline-wide DEFAULT_MAIN_REGION.
     - bash: |
         set -euo pipefail
 
-        SUB_ID="$(SUB_ID)"
+        MAIN_REGION="$(MAIN_REGION)"
         DEFAULT_REGION="$(DEFAULT_MAIN_REGION)"
-        API_BASE="$(V1_API_BASE_URL)"
 
-        DISCOVERED=""
-        URL="${API_BASE}/beta/cam/azureSubscriptions/${SUB_ID}"
-        echo "== Querying Vision One CAM for subscription $SUB_ID =="
-        echo "  GET $URL"
-
-        if [[ -z "${V1_API_KEY:-}" ]]; then
-          echo "  [WARN] V1_API_KEY is EMPTY in this job. If it is a secret pipeline"
-          echo "         variable or comes from a variable group, ensure it is mapped"
-          echo "         to env (it is, via the step 'env:' block) and that the group"
-          echo "         is linked to this pipeline. Falling back to default region."
-        else
-          echo "  V1_API_KEY length: ${#V1_API_KEY} (value masked)"
-        fi
-
-        BODY_FILE="$(mktemp)"
-        HDR_FILE="$(mktemp)"
-        set +e
-        HTTP_CODE=$(curl -sS -o "$BODY_FILE" -D "$HDR_FILE" -w '%{http_code}' \
-          -H "Authorization: Bearer ${V1_API_KEY}" \
-          -H "Accept: application/json" \
-          "$URL")
-        CURL_EXIT=$?
-        set -e
-        [[ -z "$HTTP_CODE" ]] && HTTP_CODE="000"
-        RESP=$(cat "$BODY_FILE" 2>/dev/null || echo "")
-
-        echo "  ----- DEBUG: Vision One CAM API response -----"
-        echo "  curl exit code: $CURL_EXIT"
-        echo "  HTTP status: $HTTP_CODE"
-        echo "  --- response headers ---"
-        sed 's/^/    /' "$HDR_FILE" 2>/dev/null || true
-        echo "  --- response body (raw) ---"
-        echo "$RESP" | sed 's/^/    /'
-        echo "  --- response body (pretty) ---"
-        echo "$RESP" | jq . 2>/dev/null | sed 's/^/    /' || echo "    (body is not valid JSON)"
-        echo "  ----------------------------------------------"
-
-        rm -f "$BODY_FILE" "$HDR_FILE"
-
-        case "$HTTP_CODE" in
-          200) DISCOVERED=$(echo "$RESP" | jq -r '.camDeployedRegion // empty' 2>/dev/null | tr -d '\r') ;;
-          401|403) echo "  [WARN] Auth rejected ($HTTP_CODE): check V1_API_KEY value/scope and that V1_API_BASE_URL matches your tenant region." ;;
-          404) echo "  [WARN] Not found (404): subscription not imported into Vision One CAM, or wrong API host region." ;;
-          000) echo "  [WARN] No connectivity (000): DNS/proxy/network issue reaching ${API_BASE}." ;;
-          *)   echo "  [WARN] Unexpected status $HTTP_CODE from Vision One CAM API." ;;
-        esac
-
-        if [[ -n "$DISCOVERED" && "$DISCOVERED" != "null" ]]; then
-          MAIN_REGION="$DISCOVERED"
-          echo "  Discovered camDeployedRegion from Vision One: $MAIN_REGION"
-        else
+        if [[ -z "$MAIN_REGION" ]]; then
           MAIN_REGION="$DEFAULT_REGION"
-          echo "  No region from Vision One → using DEFAULT_MAIN_REGION: $MAIN_REGION"
+          echo "No 'default_main_region' in subs.json → using DEFAULT_MAIN_REGION: $MAIN_REGION"
+        else
+          echo "Default Main Region (from subs.json): $MAIN_REGION"
         fi
 
-        # Make MAIN_REGION available to all subsequent steps in this job
+        # Make the resolved MAIN_REGION available to all subsequent steps.
         echo "##vso[task.setvariable variable=MAIN_REGION]$MAIN_REGION"
-      displayName: "Discover main region from Vision One CAM"
-      env:
-        SUB_ID: $(SUB_ID)
-        V1_API_KEY: $(V1_API_KEY)
+      displayName: "Resolve main region from subs.json"
 
     # ── Step 2: Terraform ─────────────────────────────────────────────────────
     - bash: |
@@ -299,51 +256,40 @@ stages:
             echo "false"
           }
 
-          # ── File Storage Security: detect best deployment region ─────────────
+          # ── File Storage Security: regions from subs.json ────────────────────
+          #   FSS regions are configured per-subscription in subs.json (FSS_REGIONS).
+          #   The EP1 quota is validated ONLY in the Default Main Region
+          #   (MAIN_REGION, from subs.json's "default_main_region").
           if [[ "${ENABLE_FSS,,}" != "true" ]]; then
             echo "File Storage Security DISABLED by pipeline toggle (ENABLE_FSS=$ENABLE_FSS) — skipping detection."
             FS_ENABLE=False
             FSS_REGION=""
+            FSS_DEPLOY_REGIONS="[]"
           else
-          # Allowed regions for FSS deployment (EP1 quota available in these only)
-          ALLOWED_FSS='["brazilsouth","japaneast","uaenorth","eastus","eastus2","southcentralus","westus"]'
-          # Default FSS region = CAM main region (discovered from Vision One),
-          # but only if it's an allowed FSS region; otherwise fall back to eastus.
-          if echo "$ALLOWED_FSS" | jq -e --arg r "$MAIN_REGION" 'index($r) != null' >/dev/null 2>&1; then
-            FSS_DEFAULT="$MAIN_REGION"
-          else
-            FSS_DEFAULT="eastus"
+          # Configured FSS regions (from subs.json). Default to [] if absent.
+          FSS_DEPLOY_REGIONS="${FSS_REGIONS:-[]}"
+          if ! echo "$FSS_DEPLOY_REGIONS" | jq -e 'type == "array"' >/dev/null 2>&1; then
+            echo "  [WARN] FSS_REGIONS is not a valid JSON array ('$FSS_DEPLOY_REGIONS') → using []"
+            FSS_DEPLOY_REGIONS="[]"
           fi
 
-          echo "Detecting best region for File Storage Security..."
-          # List non-TrendMicro storage accounts, count by region, sort descending
-          FSS_REGIONS_BY_COUNT=$(az resource list \
-            --subscription "$SUB_ID" \
-            --resource-type "Microsoft.Storage/storageAccounts" \
-            --query "[?tags.TrendMicroProduct == null].location" \
-            -o tsv 2>/dev/null \
-            | tr -d '\r' | tr '[:upper:]' '[:lower:]' \
-            | sort | uniq -c | sort -rn | awk '{print $2}' || echo "")
-          echo "  Customer storage regions (by count): $(echo "$FSS_REGIONS_BY_COUNT" | tr '\n' ' ')"
+          # Default Main Region = the only region where EP1 quota is validated.
+          # MAIN_REGION comes from subs.json ("default_main_region") and is already
+          # resolved (with DEFAULT_MAIN_REGION fallback) in the earlier step.
+          echo "Configured FSS regions (subs.json): $FSS_DEPLOY_REGIONS"
+          echo "Default Main Region (FSS quota validation): $MAIN_REGION"
 
-          # Pick the first region in the sorted list that's in the allowed FSS list
-          FSS_REGION=""
-          for reg in $FSS_REGIONS_BY_COUNT; do
-            if echo "$ALLOWED_FSS" | jq -e --arg r "$reg" 'index($r) != null' >/dev/null 2>&1; then
-              FSS_REGION="$reg"
-              break
-            fi
-          done
-
-          if [[ -z "$FSS_REGION" ]]; then
-            echo "  No customer storage in allowed FSS regions → defaulting to $FSS_DEFAULT"
-            FSS_REGION="$FSS_DEFAULT"
-          else
-            echo "  Selected FSS region: $FSS_REGION (most customer storage accounts)"
+          # The Default Main Region should be one of the configured FSS regions.
+          if ! echo "$FSS_DEPLOY_REGIONS" | jq -e --arg r "$MAIN_REGION" 'index($r) != null' >/dev/null 2>&1; then
+            echo "  [WARN] '$MAIN_REGION' is not listed in fss_regions for this subscription;"
+            echo "         validating EP1 quota there anyway (it is the Default Main Region)."
           fi
 
-          # ── File Storage Security: EP1 quota check in chosen region ──────────
-          echo "Checking EP1 quota in $FSS_REGION for File Storage Security..."
+          # FSS deploys to the Default Main Region (the region whose quota we validate).
+          FSS_REGION="$MAIN_REGION"
+
+          # ── File Storage Security: EP1 quota check ONLY in the main region ───
+          echo "Checking EP1 quota in $FSS_REGION (Default Main Region) for File Storage Security..."
           EP1_AVAILABLE=$(get_ep1_status "$SUB_ID" "$FSS_REGION")
           if [[ "$EP1_AVAILABLE" == "true" ]]; then
             echo "  EP1 quota available → File Storage Security ENABLED in $FSS_REGION"
@@ -362,7 +308,7 @@ stages:
               echo "  File Storage Security ENABLED (TrendMicro exception)"
               FS_ENABLE=True
             else
-              echo "  EP1 quota unavailable → File Storage Security DISABLED"
+              echo "  EP1 quota unavailable in $FSS_REGION → File Storage Security DISABLED"
               FS_ENABLE=False
             fi
           fi
@@ -444,11 +390,14 @@ stages:
 
           echo "##vso[task.setvariable variable=FS_ENABLE;isOutput=true]$FS_ENABLE"
           echo "##vso[task.setvariable variable=FSS_REGION;isOutput=true]$FSS_REGION"
+          echo "##vso[task.setvariable variable=DEPLOY_FSS_REGIONS;isOutput=true]$FSS_DEPLOY_REGIONS"
           echo "##vso[task.setvariable variable=DEPLOY_AVTD_REGIONS;isOutput=true]$FINAL_REGIONS_AVTD"
           echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$FINAL_REGIONS_DSPM"
       env:
         SUB_ID: $(SUB_ID)
         MAIN_REGION: $(MAIN_REGION)
+        DEFAULT_MAIN_REGION: $(DEFAULT_MAIN_REGION)
+        FSS_REGIONS: $(FSS_REGIONS)
         ENABLE_FSS: $(ENABLE_FSS)
         ENABLE_AVTD: $(ENABLE_AVTD)
         ENABLE_DSPM: $(ENABLE_DSPM)
@@ -681,7 +630,8 @@ stages:
           export AVTD_REGIONS=$(to_json_array "$(CheckQuota.DEPLOY_AVTD_REGIONS)")
           export DSPM_REGIONS=$(to_json_array "$(CheckQuota.DEPLOY_DSPM_REGIONS)")
           export FSS_REGION=$(CheckQuota.FSS_REGION)
-          echo "FS_ENABLE=$FS_ENABLE | FS_REGION=$FSS_REGION | AVTD=$AVTD_REGIONS | DSPM=$DSPM_REGIONS"
+          export FSS_REGIONS=$(to_json_array "$(CheckQuota.DEPLOY_FSS_REGIONS)")
+          echo "FS_ENABLE=$FS_ENABLE | FS_REGION=$FSS_REGION | FSS_REGIONS=$FSS_REGIONS | AVTD=$AVTD_REGIONS | DSPM=$DSPM_REGIONS"
 
           command -v python >/dev/null 2>&1 \
             || sudo apt-get install -yq --no-install-recommends python-is-python3
