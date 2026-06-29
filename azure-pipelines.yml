@@ -127,8 +127,10 @@ stages:
           echo "Default Main Region (from subs.json): $MAIN_REGION"
         fi
 
-        # Make the resolved MAIN_REGION available to all subsequent steps.
-        echo "##vso[task.setvariable variable=MAIN_REGION]$MAIN_REGION"
+        # Make the resolved region available to all subsequent steps.
+        # NOTE: MAIN_REGION itself is a matrix-injected (read-only) variable, so
+        # we publish under a new name instead of overwriting it.
+        echo "##vso[task.setvariable variable=MAIN_REGION_RESOLVED]$MAIN_REGION"
       displayName: "Resolve main region from subs.json"
 
     # ── Step 2: Terraform ─────────────────────────────────────────────────────
@@ -168,7 +170,7 @@ stages:
           set -euo pipefail
 
           SUB_ID="$(SUB_ID)"
-          MAIN_REGION="$(MAIN_REGION)"
+          MAIN_REGION="$(MAIN_REGION_RESOLVED)"
 
           # Install resource-graph extension only if not already present
           az extension show --name resource-graph &>/dev/null \
@@ -395,7 +397,7 @@ stages:
           echo "##vso[task.setvariable variable=DEPLOY_DSPM_REGIONS;isOutput=true]$FINAL_REGIONS_DSPM"
       env:
         SUB_ID: $(SUB_ID)
-        MAIN_REGION: $(MAIN_REGION)
+        MAIN_REGION: $(MAIN_REGION_RESOLVED)
         DEFAULT_MAIN_REGION: $(DEFAULT_MAIN_REGION)
         FSS_REGIONS: $(FSS_REGIONS)
         ENABLE_FSS: $(ENABLE_FSS)
@@ -805,7 +807,7 @@ stages:
         BACKEND_URL: $(BACKEND_URL)
         STORAGE_ACCOUNT: $(STORAGE_ACCOUNT)
         CLOUD_ACCOUNT_NAME: "$(SUB_NAME)"
-        MAIN_REGION: $(MAIN_REGION)
+        MAIN_REGION: $(MAIN_REGION_RESOLVED)
         TF_PARALLELISM: $(TF_PARALLELISM)
         TERRATAG_VERSION: $(TERRATAG_VERSION)
         TERRATAG_TAGS: $(TERRATAG_TAGS)
