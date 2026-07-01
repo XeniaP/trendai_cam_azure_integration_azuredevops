@@ -657,6 +657,16 @@ stages:
           sed -i '/variable "is_user_account"/,/}/{s/default *= *true/default = false/}' \
             "$PKG_DIR/cam/variables.tf"
 
+          # Harden the DSPM module's region lookup. The V1-generated main.tf
+          # indexes available_feature_regions["data-security-posture-management"]
+          # directly, so Terraform fails with "Invalid index" whenever DSPM has
+          # no eligible regions (e.g. ENABLE_DSPM=false → DSPM_REGIONS=[], so the
+          # feature is never in the generated map). Wrap it in try(..., []) to
+          # match how the FSS module already guards its lookup. Idempotent: an
+          # already-wrapped index has 'try(' after '=' and won't re-match.
+          sed -i 's|azure_locations *= *module\.cam\.available_feature_regions\["data-security-posture-management"\]|azure_locations = try(module.cam.available_feature_regions["data-security-posture-management"], [])|g' \
+            "$PKG_DIR/main.tf"
+
           echo "== Configuring File Storage Security =="
           if [[ "$FS_ENABLE" == "true" ]]; then
             STORAGE_NAME="{\"global\": \"${STORAGE_ACCOUNT}\"}"
