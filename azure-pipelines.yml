@@ -4,7 +4,7 @@ trigger:
 variables:
   AZURE_SERVICE_CONNECTION: 'sa-allsubscriptionstakepolicy'
   MAX_PARALLEL: 3
-  TF_VERSION: '1.14.1'
+  TF_VERSION: '1.15.7'
   TF_PARALLELISM: 30
   TERRATAG_VERSION: 'latest'  # Pin to e.g. '0.5.6' or keep 'latest' to auto-resolve
   TERRATAG_TAGS: '{}'         # Extra tags merged with dynamic ones, e.g. {"environment":"prod","team":"security"}
@@ -657,21 +657,20 @@ stages:
           sed -i '/variable "is_user_account"/,/}/{s/default *= *true/default = false/}' \
             "$PKG_DIR/cam/variables.tf"
 
-          # Harden the DSPM module's region lookup. The V1-generated main.tf
-          # indexes available_feature_regions["data-security-posture-management"]
-          # directly, so Terraform fails with "Invalid index" whenever DSPM has
-          # no eligible regions (e.g. ENABLE_DSPM=false → DSPM_REGIONS=[], so the
-          # feature is never in the generated map). Wrap it in try(..., []) to
-          # match how the FSS module already guards its lookup. Idempotent: an
-          # already-wrapped index has 'try(' after '=' and won't re-match.
-          sed -i 's|azure_locations *= *module\.cam\.available_feature_regions\["data-security-posture-management"\]|azure_locations = try(module.cam.available_feature_regions["data-security-posture-management"], [])|g' \
-            "$PKG_DIR/main.tf"
+          echo "$FS_ENABLE"
 
           echo "== Configuring File Storage Security =="
-          if [[ "$FS_ENABLE" == "true" ]]; then
-            STORAGE_NAME="{\"global\": \"${STORAGE_ACCOUNT}\"}"
-            SED_VALUE=$(printf '%s' "$STORAGE_NAME" | sed 's/"/\\\\"/g')
-            sed -i "s|quarantine_storage_account *= *\"[^\"]*\"|quarantine_storage_account = \"${SED_VALUE}\"|g" "$PKG_DIR/main.tf"
+          if [[ "$FS_ENABLE" == "True" ]]; then
+            STORAGE_NAME="{\"global\":\"${STORAGE_ACCOUNT}\"}"
+            echo "$STORAGE_NAME"
+
+            echo "Before:"
+            grep -n "quarantine_storage_account" "$PKG_DIR/main.tf"
+
+            sed -i "s|quarantine_storage_account *= *jsonencode({})|quarantine_storage_account = jsonencode(${STORAGE_NAME})|g" "$PKG_DIR/main.tf"
+
+            echo "After:"
+            grep -n "quarantine_storage_account" "$PKG_DIR/main.tf"
           fi
 
           echo "== Setting subscription context and auth =="
